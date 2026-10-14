@@ -22,10 +22,12 @@ The Go implementation stays in VirelaiOS as the reference oracle. Its
 - Targets (must compile and pass the full suite on each):
   `x86_64-linux`, `aarch64-linux`, `aarch64-macos`, `x86_64-macos`.
 - The **store format, canonical byte forms, Op/Change/Stream/Atom data
-  model, refusal names, and CLI output line formats are the ADR 0049
-  contract — byte-for-byte.** A store produced by this client must be
-  loadable by the Go implementation and vice versa. Anything not listed
-  under "Deltas" (§2) is identical to the ADR.
+  model, and refusal names are the ADR 0049 contract — byte-for-byte.**
+  The ADR does not pin CLI output lines: **the Go implementation is
+  normative for output formats** — its `consoleFn("flint: …")` calls and
+  `flint_test.go` are the reference, matched exactly. A store produced
+  by this client must be loadable by the Go implementation and vice
+  versa. Anything not listed under "Deltas" (§2) is identical to the ADR.
 - No GPL-family code anywhere (VirelaiOS rule; carries over).
 - Non-goals are the ADR's M103 non-goals: no content store or
   materialization, no `rename`/`mv` verbs, no push/pull, no concurrent
@@ -34,28 +36,39 @@ The Go implementation stays in VirelaiOS as the reference oracle. Its
 ## 1. CLI surface (M103 verb parity)
 
 Verbs, output lines (`flint: `-prefixed), refusal names, and exit codes
-match the Go implementation exactly:
+match the Go implementation exactly — the lines below are observed from
+`user/go/flint/`, not inferred:
 
 | Verb | Notes |
 |---|---|
-| `init --name=<n> --src=<dir> [--stream=<s>]` | `--stream` attaches to an existing stream and replays (ADR M103d semantics). |
-| `add [file ...]` | Diff src tree → stage fold. No args = scan whole src root. |
-| `status` | `flint: status atoms=<n> staged=<n> add=<a> modify=<m> delete=<d> duplicates=0` |
-| `commit -m <msg>` | Signs with the selected key; `secret_not_found` refusal preserved. |
-| `log` | `author=<8-hex> msg=…` lines, newest first. |
-| `verify [--all] [--file=<log>]` | `sig: verified` / `sig_invalid`; `--file` checks a standalone log. |
-| `fork <from> <to>` | Fork a stream at its head. |
-| `merge <from>` | Net-effect 3-way merge on Ops; `merge: ok`, `merge: up to date`, `merge: conflict atom=<n> type=<t>` (exit 2), `merge: src not materialized files=<n>`. |
-| `parse-corpus <dir>` | Dev/conformance verb: parse every `.go`/`.zig` file, print `flint: parse files=<n> atoms=<m> parse_errors=0`. Keep — it is how the corpus gate runs. |
+| `init --name=<n> --src=<dir> [--stream=<s>]` | Workspace names `[a-z0-9-]{1,32}` (`usage`); `--src` must exist (`src_missing`). Fresh: `flint: init ok ws=<n> stream=main` (refuses `stream_exists` when `main` exists). Attach `--stream=<s>`: replays the stream head into ATOMS (ADR M103d semantics), prints `flint: init ok ws=<n> stream=<s> atoms=<n> replayed=<m>`. Also `ws_exists`, `stream_missing`. |
+| `add [--ws=<n>] [file ...]` | `flint: add files=<n> new=<n> modified=<n> deleted=<n> unchanged=<n>`. No paths = scan the whole src root. |
+| `status [--ws=<n>]` | `flint: status ws=<n> stream=<s> atoms=<n> staged=<n> add=<a> modify=<m> delete=<d> duplicates=<n>`, then up to 64 `flint: stage <type> <qualified-name>` lines, plus `flint: stage … +<n>` when the stage exceeds 64. |
+| `commit [-m=<msg> \| --message=<msg>] [--ws=<n>]` | Message 1–512 bytes valid UTF-8 → `message_invalid`; empty stage → `nothing_to_commit`; `secret_not_found` preserved. Prints `flint: commit ok id=<uuid> ops=<n> parent=<id\|none>`. |
+| `log [--stream=<s>] [--ws=<n>]` | `flint: change <id> parent=<id\|none> ops=<n> author=<8-hex> msg=<first line>`, newest first, capped at 64. |
+| `verify <id> \| --all \| --file=<log>` | Per change: `flint: verify <id> sig: verified` or `flint: verify <id> sig_invalid`; exit 1 when any line is invalid. Bare `<id>` verifies one change (`change_missing`); `--file` checks a standalone log. |
+| `fork <from> <to>` | Fork a stream at its head; `flint: fork ok stream=<to> head=<id>`. Refuses `stream_missing`, `stream_exists`, `fork_empty`. |
+| `merge <from> [--ws=<n>]` | Net-effect 3-way merge on Ops. `flint: merge up to date`; on success `flint: merge ok conflicts=0 ops=<n> id=<id>` followed by `flint: merge src not materialized files=<n>`; conflicts print one `flint: merge conflict atom=<name> type=<t>` per conflict plus `flint: merge conflicts=<n>` (exit 2). Refuses `stage_dirty` when the workspace stage is non-empty. |
+| `parse-corpus <dir>` | Dev/conformance verb: parse every `.go`/`.zig` file, write `<dir>.OUT` = `parser.Render(atoms)` via the crash-safe write (**contractual — the corpus gate compares it byte-for-byte**), print `flint: parse files=<n> atoms=<m> parse_errors=<e>`. Keep — it is how the corpus gate runs. |
 | `keygen [--name=<n>]` | **New, host-only.** Generate a 32-byte seed, store it, print the derived public key hex. See §2.3. |
+
+Workspace selection for `add`/`status`/`commit`/`log`/`merge` follows the
+Go `resolveWorkspace`: `--ws=` names it (`ws_missing`); otherwise the sole
+workspace wins; with several workspaces, path args under a `src` select it,
+else the single workspace holding a stage, else `ws_ambiguous`.
 
 Exit codes: `0` success, `1` refusal/error, `2` usage error or merge
 conflict. Refusals print `flint: refuse <name>` — the refusal name
-vocabulary (`stream_torn`, `store_too_large`, `stale_head`,
-`secret_not_found`, `src_behind`, `parse_unsupported`, `clock_unset`,
-`change_malformed`, `atom_malformed`, `stage_malformed`,
-`stream_malformed`, `ws_malformed`, …) is part of the contract; use the
-same names the Go implementation uses for the same conditions.
+vocabulary is part of the contract. The full set used for these verbs:
+`usage`, `src_missing`, `ws_exists`, `ws_missing`, `ws_ambiguous`,
+`stream_missing`, `stream_exists`, `stream_torn`, `stream_malformed`,
+`stale_head`, `fork_empty`, `stage_dirty`, `nothing_to_commit`,
+`message_invalid`, `secret_not_found`, `src_behind`, `parse_unsupported`,
+`syntax`, `duplicate_decl`, `change_missing`, `change_malformed`,
+`atom_malformed`, `stage_malformed`, `ws_malformed`, `store_too_large`,
+`store_not_found`, `key_exists`, `clock_unset` (unreachable on a POSIX
+host — keep the name). Use the same name the Go implementation uses for
+the same condition.
 
 ## 2. Deltas from ADR 0049 (everything else is identical)
 
@@ -65,7 +78,10 @@ same names the Go implementation uses for the same conditions.
   `ws/<name>/` with `src` a `/host` path.
 - Host: store root resolves in order: `--store <dir>` flag →
   `FLINT_STORE` env var → walk up from cwd for a directory containing
-  `.flint/` → error `store_not_found` naming where it looked.
+  `.flint/` **or `FLINT/`** → error `store_not_found` naming where it
+  looked. (The guest store dir is `FLINT`, uppercase; accepting both
+  names means a store copied off the guest as `./FLINT` is discovered
+  without a rename.)
 - The interior layout is **unchanged**: `streams/<id>.json`,
   `streams/<id>.jsonl`, `ws/<name>/{WORKSPACE,ATOMS,STAGE,MERGE}.json*`
   — same names, same JSON fields, same bounds (4 MiB reads, 4096 Atoms,
@@ -100,6 +116,10 @@ same names the Go implementation uses for the same conditions.
   - `commit` selects a key by `--key <n>` → `FLINT_SIGN_KEY` env (a key
     name or a 64-hex seed literal) → the store's sole key if exactly one
     exists → else `secret_not_found`.
+  - **Exposure, documented:** a seed literal passed via `--key` or
+    `FLINT_SIGN_KEY` is visible in `/proc/<pid>/environ` (Linux), `ps e`
+    output, and shell history. Key names are the preferred form; the
+    literal form exists for tests and harnesses. `--help`/docs say so.
   - The seed is wiped from memory after signing. `author` =
     Ed25519 public key derived from the seed, identical derivation to
     `sshlib.EdDerivePublic` (which is RFC 8032; `std.crypto.sign.Ed25519`
@@ -124,6 +144,10 @@ same names the Go implementation uses for the same conditions.
   not the signed form"). Emit fields in the same order as the Go
   struct declarations (`store.go`, `change.go`) so host- and
   guest-written files diff cleanly.
+- Go's `encoding/json` HTML-escapes `<`, `>`, `&` (and U+2028/2029) in
+  emitted strings; `std.json` does not. The port must replicate Go's
+  escaping byte-for-byte or host- and guest-written files will not diff
+  cleanly.
 - Line-oriented files end every record with `\n`; a payload whose final
   byte is not `\n` is `stream_torn`. An empty line inside a JSONL is
   `change_malformed` (atoms: `atom_malformed`, stage: `stage_malformed`).
@@ -251,7 +275,10 @@ fully green with C3.
 - Content store / checkout / materializing merged source (needs a blob
   store; it is FLINT M1 in VirelaiOS too).
 - `flint rename` / `flint mv` verbs; heuristic rename detection (never).
-- Push/pull, networking, a daemon, leases/concurrent writers.
+- Push/pull, networking, a daemon, leases/concurrent writers. (The
+  host-side sync verbs — `push`/`pull`/`clone` against `flintd` — are
+  spec'd in `docs/flint-server-spec.md` §4 in the flint-server repo and
+  land under VirelaiOS milestone M106, not this arc.)
 - Trust roots/policy for `author`; `verify` proves integrity + which
   key signed, not that the key is trusted.
 - Reading VirelaiOS guest internals (SECRETS.TXT, OWNERS.TXT, `/host`
