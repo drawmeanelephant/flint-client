@@ -1,0 +1,103 @@
+{
+  "name": "conflict_priority_rules",
+  "base_atoms": [
+    {
+      "id": "0199de2d-dc00-7000-8000-000000000001",
+      "kind": "fn",
+      "name": "sample.X",
+      "hash": "1111111111111111111111111111111111111111111111111111111111111111",
+      "sig_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "span": { "file": "go/sample.go", "start": 10, "end": 50 }
+    },
+    {
+      "id": "0199de2d-dc00-7000-8000-000000000002",
+      "kind": "fn",
+      "name": "sample.Y",
+      "hash": "2222222222222222222222222222222222222222222222222222222222222222",
+      "sig_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "span": { "file": "go/sample.go", "start": 60, "end": 100 }
+    },
+    {
+      "id": "0199de2d-dc00-7000-8000-000000000003",
+      "kind": "fn",
+      "name": "sample.Z",
+      "hash": "3333333333333333333333333333333333333333333333333333333333333333",
+      "sig_hash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "span": { "file": "go/sample.go", "start": 110, "end": 150 }
+    }
+  ],
+  "into": [
+    [
+      {
+        "type": "delete",
+        "atom_id": "0199de2d-dc00-7000-8000-000000000001",
+        "old_hash": "1111111111111111111111111111111111111111111111111111111111111111"
+      },
+      {
+        "type": "modify",
+        "atom_id": "0199de2d-dc00-7000-8000-000000000002",
+        "new_hash": "2424242424242424242424242424242424242424242424242424242424242424",
+        "new_sig_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "old_hash": "2222222222222222222222222222222222222222222222222222222222222222"
+      },
+      {
+        "type": "move",
+        "atom_id": "0199de2d-dc00-7000-8000-000000000003",
+        "new_span": { "file": "go/moved.go", "start": 10, "end": 50 },
+        "old_hash": "3333333333333333333333333333333333333333333333333333333333333333"
+      }
+    ]
+  ],
+  "from": [
+    [
+      {
+        "type": "modify",
+        "atom_id": "0199de2d-dc00-7000-8000-000000000001",
+        "new_hash": "1515151515151515151515151515151515151515151515151515151515151515",
+        "new_sig_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "old_hash": "1111111111111111111111111111111111111111111111111111111111111111"
+      },
+      {
+        "type": "rename",
+        "atom_id": "0199de2d-dc00-7000-8000-000000000001",
+        "new_name": "sample.X2",
+        "old_hash": "1111111111111111111111111111111111111111111111111111111111111111"
+      },
+      {
+        "type": "modify",
+        "atom_id": "0199de2d-dc00-7000-8000-000000000002",
+        "new_hash": "2525252525252525252525252525252525252525252525252525252525252525",
+        "new_sig_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "old_hash": "2222222222222222222222222222222222222222222222222222222222222222"
+      },
+      {
+        "type": "rename",
+        "atom_id": "0199de2d-dc00-7000-8000-000000000002",
+        "new_name": "sample.Y2",
+        "old_hash": "2222222222222222222222222222222222222222222222222222222222222222"
+      },
+      {
+        "type": "modify",
+        "atom_id": "0199de2d-dc00-7000-8000-000000000003",
+        "new_hash": "3535353535353535353535353535353535353535353535353535353535353535",
+        "new_sig_hash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "old_hash": "3333333333333333333333333333333333333333333333333333333333333333"
+      },
+      {
+        "type": "rename",
+        "atom_id": "0199de2d-dc00-7000-8000-000000000003",
+        "new_name": "sample.Z2",
+        "old_hash": "3333333333333333333333333333333333333333333333333333333333333333"
+      }
+    ]
+  ],
+  "want": {
+    "clean": false,
+    "ops": [],
+    "conflicts": [
+      { "name": "sample.X", "type": "delete_vs_modify" },
+      { "name": "sample.Y", "type": "concurrent_modify" },
+      { "name": "sample.Z", "type": "modify_vs_move" }
+    ]
+  }
+}

@@ -1,0 +1,58 @@
+{
+  "name": "equal_rename_and_equal_move",
+  "base_atoms": [
+    {
+      "id": "0199de2d-dc00-7000-8000-000000000001",
+      "kind": "fn",
+      "name": "sample.X",
+      "hash": "1111111111111111111111111111111111111111111111111111111111111111",
+      "sig_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "span": { "file": "go/sample.go", "start": 10, "end": 50 }
+    },
+    {
+      "id": "0199de2d-dc00-7000-8000-000000000002",
+      "kind": "fn",
+      "name": "sample.Y",
+      "hash": "2222222222222222222222222222222222222222222222222222222222222222",
+      "sig_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "span": { "file": "go/sample.go", "start": 60, "end": 100 }
+    }
+  ],
+  "into": [
+    [
+      {
+        "type": "rename",
+        "atom_id": "0199de2d-dc00-7000-8000-000000000001",
+        "new_name": "sample.XSame",
+        "old_hash": "1111111111111111111111111111111111111111111111111111111111111111"
+      },
+      {
+        "type": "move",
+        "atom_id": "0199de2d-dc00-7000-8000-000000000002",
+        "new_span": { "file": "go/same.go", "start": 10, "end": 50 },
+        "old_hash": "2222222222222222222222222222222222222222222222222222222222222222"
+      }
+    ]
+  ],
+  "from": [
+    [
+      {
+        "type": "rename",
+        "atom_id": "0199de2d-dc00-7000-8000-000000000001",
+        "new_name": "sample.XSame",
+        "old_hash": "1111111111111111111111111111111111111111111111111111111111111111"
+      },
+      {
+        "type": "move",
+        "atom_id": "0199de2d-dc00-7000-8000-000000000002",
+        "new_span": { "file": "go/same.go", "start": 10, "end": 50 },
+        "old_hash": "2222222222222222222222222222222222222222222222222222222222222222"
+      }
+    ]
+  ],
+  "want": {
+    "clean": true,
+    "ops": [],
+    "conflicts": []
+  }
+}

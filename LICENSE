@@ -1,0 +1,185 @@
+# VIRELAIOS PROPRIETARY SOURCE-AVAILABLE LICENSE
+
+## Version 1.0
+
+Copyright © 2026 draw me an elephant
+
+All rights reserved.
+
+### 1. Yes, You Can See the Source
+
+The source code and related materials for VirelaiOS (collectively, the “Software”) have been made publicly visible.
+
+That means you may look at them.
+
+Congratulations.
+
+Public visibility does **not** mean the Software is open source, free software, public domain, freeware, community property, abandonware, or yours.
+
+Except for the limited rights expressly granted by this License or separately required by the terms of the hosting platform through which you access the Software, no license or other right is granted to you.
+
+### 2. What You May Do
+
+You may:
+
+1. View and inspect the publicly available source code for personal evaluation, commentary, criticism, security review, or educational study.
+
+2. Link to the official VirelaiOS repository.
+
+3. Exercise any limited rights that the operator of the repository hosting service separately requires the copyright holder to grant to users of that service, but only to the extent and for the purposes provided by that service's terms.
+
+That is the list.
+
+It is intentionally short.
+
+### 3. What You May Not Do
+
+Unless you first obtain express written permission from the Copyright Holder, you may not:
+
+1. use or execute the Software for your own project, product, service, operating system, firmware, application, appliance, device, research platform, commercial venture, or other work;
+
+2. copy or reproduce the Software except as expressly permitted by Section 2;
+
+3. modify, adapt, translate, port, transform, or create derivative works based upon the Software;
+
+4. redistribute, republish, mirror, sublicense, sell, lease, rent, transfer, provide, or otherwise make the Software or a derivative of it available to another person or entity;
+
+5. incorporate any portion of the Software into another project or codebase;
+
+6. use the Software to provide a commercial or hosted service;
+
+7. remove, conceal, alter, or misrepresent any copyright, attribution, authorship, trademark, license, or other proprietary notice;
+
+8. represent yourself or anyone else as the author, owner, maintainer, official distributor, or authorized representative of VirelaiOS;
+
+9. use the Software or substantial portions of it as training data, fine-tuning data, evaluation data, benchmark data, retrieval material, corpus material, or other input for a machine-learning or artificial-intelligence system, except where the Copyright Holder has separately authorized that use in writing or where such rights have been separately granted to the repository hosting provider under its applicable terms;
+
+10. use the availability of the source code as an excuse to perform any activity for which this License does not actually grant permission.
+
+Being able to read something is not the same thing as being licensed to take it.
+
+This should not be a difficult concept.
+
+### 4. Forks Are Not Freedom
+
+If the Software is hosted in a public repository on a service that permits users to create forks, copies, or similar repository objects under that service's terms, the existence of that functionality does not grant any additional license to the Software.
+
+A fork is a fork.
+
+It is not a copyright assignment, open-source license, permission slip, divine revelation, or clever legal loophole.
+
+Any rights arising independently under the hosting service's terms remain limited to those terms.
+
+All other rights remain reserved.
+
+### 5. No Implied License
+
+No license is granted by implication, estoppel, publication, public visibility, failure to complain immediately, the existence of a clone button, vibes, wishful thinking, or any other theory not expressly stated in this License.
+
+Silence does not mean permission.
+
+A public Git repository does not mean “please help yourself.”
+
+### 6. Contributions
+
+Unless a separate written contributor agreement applies, you should not submit code, documentation, artwork, patches, pull requests, or other copyrightable material to VirelaiOS unless you have the legal authority to do so and understand that additional contribution terms may be required before the contribution is accepted.
+
+The Copyright Holder may reject, close, ignore, ridicule, or otherwise decline any proposed contribution for any reason or no reason.
+
+Opening a pull request does not obligate anybody to merge your masterpiece.
+
+### 7. Third-Party Software and Services
+
+VirelaiOS may interact with, target, reference, or depend upon software, APIs, frameworks, specifications, platforms, trademarks, or other materials owned by third parties.
+
+Those materials remain subject to their respective owners' rights and applicable terms.
+
+This License applies only to rights in VirelaiOS that the Copyright Holder is legally entitled to license.
+
+Nothing in this License grants rights to Apple Inc., Apple technologies, Apple trademarks, Virtualization.framework, Zig, GitHub, or any other third-party property.
+
+### 8. Names and Trademarks
+
+No permission is granted to use the names “VirelaiOS,” its logos, mascots, branding, trade dress, or other identifying marks in a manner that suggests endorsement, affiliation, sponsorship, authorship, or official status.
+
+You may use the name factually when referring to the actual VirelaiOS project.
+
+Do not make “VirelaiOS Enterprise Edition,” put an elephant on it, and act surprised when somebody objects.
+
+### 9. No Warranty
+
+THE SOFTWARE IS PROVIDED FOR VIEWING ON AN “AS IS” AND “AS AVAILABLE” BASIS, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED.
+
+TO THE MAXIMUM EXTENT PERMITTED BY LAW, THE COPYRIGHT HOLDER DISCLAIMS ALL WARRANTIES, INCLUDING WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, TITLE, NON-INFRINGEMENT, ACCURACY, RELIABILITY, SECURITY, AND FREEDOM FROM DEFECTS.
+
+THIS IS AN OPERATING SYSTEM CALLED VIRELAIOS.
+
+ADJUST YOUR EXPECTATIONS ACCORDINGLY.
+
+### 10. Limitation of Liability
+
+TO THE MAXIMUM EXTENT PERMITTED BY LAW, THE COPYRIGHT HOLDER SHALL NOT BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, CONSEQUENTIAL, OR OTHER DAMAGES ARISING FROM OR RELATED TO THE SOFTWARE, ITS PUBLICATION, YOUR ACCESS TO IT, YOUR INABILITY TO ACCESS IT, OR ANY UNAUTHORIZED USE OF IT.
+
+THIS INCLUDES, WITHOUT LIMITATION, LOSS OF DATA, LOSS OF PROFITS, LOSS OF BUSINESS, HARDWARE DAMAGE, SOFTWARE DAMAGE, DOWNTIME, SECURITY INCIDENTS, OR THE REALIZATION THAT WRITING AN OPERATING SYSTEM FROM SCRATCH WAS PERHAPS AN UNUSUAL WAY TO SPEND THE WEEK.
+
+### 11. Permission Is Available by Asking
+
+The Copyright Holder may grant additional rights under a separate written agreement.
+
+If you want to use, modify, redistribute, incorporate, commercialize, research with, teach with, or otherwise do something with VirelaiOS that this License does not permit, ask first.
+
+The answer might even be yes.
+
+Doing it first and developing an elaborate theory about why you never needed permission is the less efficient approach.
+
+### 12. Termination
+
+Any rights granted to you under this License terminate automatically if you violate its terms.
+
+Upon termination, you must cease any activity that depended upon those rights.
+
+Termination does not limit any rights or remedies otherwise available to the Copyright Holder.
+
+### 13. Reservation of Rights
+
+All rights not expressly granted in this License are reserved by the Copyright Holder.
+
+For anyone who skipped directly to the bottom hoping for a surprise:
+
+**No, you may not take the code.**
+
+### 14. Severability
+
+If any provision of this License is held unenforceable, invalid, or unlawful, that provision shall be enforced to the maximum extent permitted by law and shall not affect the remaining provisions.
+
+The rest of the license does not explode merely because one sentence had a bad day.
+
+### 15. No Waiver
+
+Failure or delay by the Copyright Holder in enforcing any provision of this License does not waive that provision or any other right.
+
+Getting away with something once is not precedent.
+
+### 16. Entire License
+
+This License states the permissions granted by the Copyright Holder with respect to the Software unless a separate written agreement expressly provides otherwise.
+
+README files, jokes, issue comments, commit messages, screenshots, social-media posts, elephants, beans, and sarcastic remarks do not independently expand the rights granted by this License.
+
+---
+
+## TL;DR FOR VIRELAIS
+
+You may **look at VirelaiOS**.
+
+You may **talk about VirelaiOS**.
+
+You may **link to VirelaiOS**.
+
+GitHub may let you **fork VirelaiOS on GitHub** because that is part of using GitHub.
+
+You may **not take VirelaiOS code and use it for your own shit** unless you get written permission.
+
+The source is public.
+
+The rights are not.

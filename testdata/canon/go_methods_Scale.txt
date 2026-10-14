@@ -1,0 +1,1 @@
+func ( r * Rect ) _ ( f float64 ) { r . W *= f r . H *= f }

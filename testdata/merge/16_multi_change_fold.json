@@ -1,0 +1,51 @@
+{
+  "name": "multi_change_fold",
+  "base_atoms": [],
+  "into": [],
+  "from": [
+    [
+      {
+        "type": "add",
+        "atom_id": "0199de2d-dc00-7000-8000-000000000030",
+        "kind": "fn",
+        "new_name": "sample.Step",
+        "new_span": { "file": "go/sample.go", "start": 10, "end": 40 },
+        "new_hash": "6060606060606060606060606060606060606060606060606060606060606060",
+        "new_sig_hash": "f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0"
+      }
+    ],
+    [
+      {
+        "type": "modify",
+        "atom_id": "0199de2d-dc00-7000-8000-000000000030",
+        "new_hash": "6161616161616161616161616161616161616161616161616161616161616161",
+        "new_sig_hash": "f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0",
+        "old_hash": "6060606060606060606060606060606060606060606060606060606060606060"
+      }
+    ],
+    [
+      {
+        "type": "modify",
+        "atom_id": "0199de2d-dc00-7000-8000-000000000030",
+        "new_hash": "6262626262626262626262626262626262626262626262626262626262626262",
+        "new_sig_hash": "f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1",
+        "old_hash": "6161616161616161616161616161616161616161616161616161616161616161"
+      }
+    ]
+  ],
+  "want": {
+    "clean": true,
+    "ops": [
+      {
+        "type": "add",
+        "atom_id": "0199de2d-dc00-7000-8000-000000000030",
+        "kind": "fn",
+        "new_name": "sample.Step",
+        "new_span": { "file": "go/sample.go", "start": 10, "end": 40 },
+        "new_hash": "6262626262626262626262626262626262626262626262626262626262626262",
+        "new_sig_hash": "f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1"
+      }
+    ],
+    "conflicts": []
+  }
+}

@@ -1,0 +1,2211 @@
+{
+  "version": 1,
+  "files": 100,
+  "atoms": [
+    {
+      "file": "go/alias.go",
+      "kind": "type_alias",
+      "name": "nums.Score",
+      "start": 19,
+      "end": 30,
+      "hash": "398540cd633e4978599fe954b820c10d0480546da5d76f3a6996409e720c5f99",
+      "sig_hash": "ef20ddd6de2c9d05f7cd027ae0e1b3edf51d5ad6047ba4b903aaf23c4fa5256d"
+    },
+    {
+      "file": "go/alias.go",
+      "kind": "type",
+      "name": "nums.Rank",
+      "start": 36,
+      "end": 44,
+      "hash": "4eeb8e2146212ea4a77553d039458ca1a9889520af55adac90902f23066f228d",
+      "sig_hash": "3af2bc7288cc1673a1a5acc33feb99d4b6a96d84910ea43dd3e4f72f48e81560"
+    },
+    {
+      "file": "go/alias.go",
+      "kind": "type_alias",
+      "name": "nums.Grade",
+      "start": 50,
+      "end": 62,
+      "hash": "4eb475d936d3db713f1e282ff7ecd4fc56308631dff3905b05b60aae63923996",
+      "sig_hash": "051ec9d30f583ce6fd411f56869eb41847578fe8b2242c99b2c6001d835bd5a3"
+    },
+    {
+      "file": "go/comments.go",
+      "kind": "fn",
+      "name": "cmts.C",
+      "start": 38,
+      "end": 100,
+      "hash": "c2015544be69879cc947a786d82f40bb73da0960bee88dd1b8771903f18ae8c6",
+      "sig_hash": "f2a1f78904c01fa19d627373a2547214b6e1550cb9f92d5710149f2c14dd5080"
+    },
+    {
+      "file": "go/consts01.go",
+      "kind": "const",
+      "name": "vals.Alpha1",
+      "start": 20,
+      "end": 30,
+      "hash": "f1b6e383fc0c83cc837b5d51a44b06a87f1444157efe027edb511356d437b09e",
+      "sig_hash": "2c8bcd1d1ca9b707df40dcc120cc2c05b3a62cbf741d2dfb3ce163385c3cf7c2"
+    },
+    {
+      "file": "go/consts01.go",
+      "kind": "const",
+      "name": "vals.Beta1",
+      "start": 37,
+      "end": 48,
+      "hash": "63dbdb0f7c31024d50ff83ec672e099385fe0c2018cfa0d3db51beb02e4d434a",
+      "sig_hash": "10e57e6c02836360c11484ee99980e2f93e9262bd1fffa9b864aded0d633ee96"
+    },
+    {
+      "file": "go/consts01.go",
+      "kind": "const",
+      "name": "vals.Gamma1",
+      "start": 55,
+      "end": 67,
+      "hash": "02fd1d681f7085759c51c478487aff1b258f05e63a192efd0070679caa2ce235",
+      "sig_hash": "92afb6593d2c07c56cf73b54abb9e78b7a60d7aaf1ec0e13a53148f0a323f45e"
+    },
+    {
+      "file": "go/consts02.go",
+      "kind": "const",
+      "name": "vals.Alpha2",
+      "start": 20,
+      "end": 30,
+      "hash": "e598f9343a814ea71a4dc56766b54e68388b969e80e864f0ea08e26ca8fb3ce2",
+      "sig_hash": "6dbde06a930d9658ca98ea7b4e5d7fffa549af43eac0ee8e34d497344ebf7e9e"
+    },
+    {
+      "file": "go/consts02.go",
+      "kind": "const",
+      "name": "vals.Beta2",
+      "start": 37,
+      "end": 48,
+      "hash": "6549ebe75772fa81d70f6386cd0e972da57378abcae88965e03ebaae6394663a",
+      "sig_hash": "4619a9cb5676104885846763fbcdea0bca837be6588e3c81093a551d7c07da3d"
+    },
+    {
+      "file": "go/consts02.go",
+      "kind": "const",
+      "name": "vals.Gamma2",
+      "start": 55,
+      "end": 67,
+      "hash": "57b3400ff07eca3b1496fc47edc1cee382194cc68e9d8b703c430af7045a6bb8",
+      "sig_hash": "c243d3a10a36fbfd7d6ddc3aa7a90a3ce4047458cf45e7d6ffda1e2c935fe635"
+    },
+    {
+      "file": "go/consts03.go",
+      "kind": "const",
+      "name": "vals.Alpha3",
+      "start": 20,
+      "end": 30,
+      "hash": "bcd0f69d4b167b8babb2ea6b4553ef3243a7d871896911cb31f00c7fa8362ff0",
+      "sig_hash": "c25b9fedb45c5367bdbfa536c084da4fe4d5093c558371e832141d29bb6384c7"
+    },
+    {
+      "file": "go/consts03.go",
+      "kind": "const",
+      "name": "vals.Beta3",
+      "start": 37,
+      "end": 48,
+      "hash": "c38b50b869b36de1fc6d306f9ad8f53c4b8af0f048e92ea53038038f82dd606a",
+      "sig_hash": "011d4b7ef1d3b5ad1bef401aafe0ac7e1dc07abad299256ad97390d8577b52c5"
+    },
+    {
+      "file": "go/consts03.go",
+      "kind": "const",
+      "name": "vals.Gamma3",
+      "start": 55,
+      "end": 67,
+      "hash": "4d36ca734bbcaf9f06c7dc274adce52594b93e8e6a636895c976bdab7e5dbdd9",
+      "sig_hash": "d23b74e074f9b07224d1ed16959c9ced5a7bb879c1094e439efe0647fba9a4fb"
+    },
+    {
+      "file": "go/consts04.go",
+      "kind": "const",
+      "name": "vals.Alpha4",
+      "start": 20,
+      "end": 30,
+      "hash": "02989d40eb479e3df40b9f4281ccdcfbc09006aa468a9c74ae3798c1e9e81eb7",
+      "sig_hash": "f577e912782af1ec6e4830ff3ebe7d5838b9a9b08f958ae03cb00e0a536bd3c6"
+    },
+    {
+      "file": "go/consts04.go",
+      "kind": "const",
+      "name": "vals.Beta4",
+      "start": 37,
+      "end": 48,
+      "hash": "9aafa206834321ecc3f3664b52e99ff33d5bc1d88af00e891f0e0e1cf0c6fd6d",
+      "sig_hash": "d2d0b308d47cca3cf1e4c344010c591a1a287a8607ead78ac6f87a8ff9eea433"
+    },
+    {
+      "file": "go/consts04.go",
+      "kind": "const",
+      "name": "vals.Gamma4",
+      "start": 55,
+      "end": 67,
+      "hash": "901e0680b578439202d5ffc5f5b81b4208bce263aa47c111ab5aba70212f419e",
+      "sig_hash": "9a288f43c95533ee59667b0c1ee328e8783835f1f5986f95b4619ff75bb24cca"
+    },
+    {
+      "file": "go/consts_group.go",
+      "kind": "const",
+      "name": "vals.North",
+      "start": 23,
+      "end": 35,
+      "hash": "19641c6c89f90e6a0a364815b26ecada7064a1c7593c5a3963c610ae27e5d17c",
+      "sig_hash": "c56ea715e88324823cce5eedc03f7203e18075bb978f36430ed0c1650e2e15e7"
+    },
+    {
+      "file": "go/consts_group.go",
+      "kind": "const",
+      "name": "vals.East",
+      "start": 37,
+      "end": 41,
+      "hash": "38f64fca889f4f7af20b282b5eeec013d776da8e3072031e9c14ca11d724f6c7",
+      "sig_hash": "2cb5663d9c18ae9226900bc496980a9602312a2b9f461cecfd6da4f96e2d7c40"
+    },
+    {
+      "file": "go/consts_group.go",
+      "kind": "const",
+      "name": "vals.South",
+      "start": 43,
+      "end": 48,
+      "hash": "6052a31ce1b5bff12883f78bd1b993d684ce9a1017af20b906fb478829d45bb5",
+      "sig_hash": "902509a04f33a49f3311c4bdfc84247cdd3a4a85739927e076e1135c49042bc7"
+    },
+    {
+      "file": "go/consts_group.go",
+      "kind": "const",
+      "name": "vals.West",
+      "start": 50,
+      "end": 54,
+      "hash": "f967ff7c41fd11dcb2c034ae526952ff234d9b049c7ab413d944c7ea77152a29",
+      "sig_hash": "90244095dd29ec93a8245cefe950cc61c52b0b1f07868aecf7a80c5dfccb195d"
+    },
+    {
+      "file": "go/consts_group.go",
+      "kind": "const",
+      "name": "vals.Pi",
+      "start": 64,
+      "end": 84,
+      "hash": "b07ee8449ba7f4e3ce2f59ac9344f4f199782a82ba867b81598d6d3548681289",
+      "sig_hash": "723a9d722537a5400b729205fbb64dbf8f15bbc66bd73dd2b500275f6df7bf56"
+    },
+    {
+      "file": "go/docced.go",
+      "kind": "struct",
+      "name": "docs.Widget",
+      "start": 45,
+      "end": 72,
+      "hash": "574ea29913bd3b22a9ffbe1884be14152adbda4714c265f2637988405f0893f6",
+      "sig_hash": "dab904ba7a4b9768ff1bbc7228c5988d155443f611c22b0dc8466e8df83a896c"
+    },
+    {
+      "file": "go/docced.go",
+      "kind": "fn",
+      "name": "docs.Draw",
+      "start": 101,
+      "end": 143,
+      "hash": "91c64937cf155d9caf002e48eeb3fce461147bddbbd83f27abb2d7f148467b5a",
+      "sig_hash": "0ca5b95419ad5970da3c14e7b9a66d0ec660f17661fee5a4634aef8404d37e5a"
+    },
+    {
+      "file": "go/embedded.go",
+      "kind": "struct",
+      "name": "emb.Base",
+      "start": 18,
+      "end": 41,
+      "hash": "acf0ffc0d93c0c6cbe0c10b6f60602ef2764eab7b63a71f747abbd4445cb684d",
+      "sig_hash": "01b8d537005632ecc29f58b1e4f4d3bd2764cfab43f535f819e25a8856c0f1a9"
+    },
+    {
+      "file": "go/embedded.go",
+      "kind": "struct",
+      "name": "emb.Derived",
+      "start": 48,
+      "end": 84,
+      "hash": "255068249a0e4651a55d59c7ff0f02e2819828377f8145717ea035cb832e12b6",
+      "sig_hash": "463ab67eae2271581520e346f245f9640d6eb5a7de471514fef84c4ac5087057"
+    },
+    {
+      "file": "go/empty_body.go",
+      "kind": "fn",
+      "name": "vac.Nop",
+      "start": 13,
+      "end": 26,
+      "hash": "d723459337b71beb8bfcb295474ae58cacd81cd9af80d67885fc56684e8e1f13",
+      "sig_hash": "17e164e17311656cc991f9188c20e48965562f9b54402aed97e9daa1c327a80a"
+    },
+    {
+      "file": "go/empty_body.go",
+      "kind": "struct",
+      "name": "vac.Empty",
+      "start": 33,
+      "end": 47,
+      "hash": "d108a1ffa62fbb90a65fe8d4ee0b9eadb63827342164d083a90d2d05ff13dd8a",
+      "sig_hash": "8f42b5c831400f9f44043940907eca9afc50eec168a4cd2de952f3a1d284988e"
+    },
+    {
+      "file": "go/funcs01.go",
+      "kind": "fn",
+      "name": "math.add1",
+      "start": 14,
+      "end": 52,
+      "hash": "593fecc8d426a27767912cf7ee23f678156804d6e8feb4adb7ecf4aafd24fbe9",
+      "sig_hash": "2a7d3a2f62408a9b2d666d2d12f83c6d8ac4e1342f2fd634e47ff5a50a339eb5"
+    },
+    {
+      "file": "go/funcs01.go",
+      "kind": "fn",
+      "name": "math.sub1",
+      "start": 54,
+      "end": 92,
+      "hash": "9dd209c8e140b3a99158307765b29b9714c816cee9a6251823732ba4237527e7",
+      "sig_hash": "2a7d3a2f62408a9b2d666d2d12f83c6d8ac4e1342f2fd634e47ff5a50a339eb5"
+    },
+    {
+      "file": "go/funcs02.go",
+      "kind": "fn",
+      "name": "math.add2",
+      "start": 14,
+      "end": 52,
+      "hash": "f7d1b9de6ad50dafe330de61ce37a102c49450204071815320134f9b3b9d201f",
+      "sig_hash": "2a7d3a2f62408a9b2d666d2d12f83c6d8ac4e1342f2fd634e47ff5a50a339eb5"
+    },
+    {
+      "file": "go/funcs02.go",
+      "kind": "fn",
+      "name": "math.sub2",
+      "start": 54,
+      "end": 92,
+      "hash": "3e89098177faa33f3ba26f4c8f61edddeeb974ca751dc126099da1317595cf8d",
+      "sig_hash": "2a7d3a2f62408a9b2d666d2d12f83c6d8ac4e1342f2fd634e47ff5a50a339eb5"
+    },
+    {
+      "file": "go/funcs03.go",
+      "kind": "fn",
+      "name": "math.add3",
+      "start": 14,
+      "end": 52,
+      "hash": "33b2f17822a87adce2c3542d7e51d66e1720e41a58d6577d0a71243041a43630",
+      "sig_hash": "2a7d3a2f62408a9b2d666d2d12f83c6d8ac4e1342f2fd634e47ff5a50a339eb5"
+    },
+    {
+      "file": "go/funcs03.go",
+      "kind": "fn",
+      "name": "math.sub3",
+      "start": 54,
+      "end": 92,
+      "hash": "2b7ce4bd95b22e68db4c8f2567a5f7992f5d06a114435826d5751196ce06cc73",
+      "sig_hash": "2a7d3a2f62408a9b2d666d2d12f83c6d8ac4e1342f2fd634e47ff5a50a339eb5"
+    },
+    {
+      "file": "go/funcs04.go",
+      "kind": "fn",
+      "name": "math.add4",
+      "start": 14,
+      "end": 52,
+      "hash": "21dd6116fbfd2b9d42470b5a9c1489c312682881bbb567e188a8239339bec277",
+      "sig_hash": "2a7d3a2f62408a9b2d666d2d12f83c6d8ac4e1342f2fd634e47ff5a50a339eb5"
+    },
+    {
+      "file": "go/funcs04.go",
+      "kind": "fn",
+      "name": "math.sub4",
+      "start": 54,
+      "end": 92,
+      "hash": "e9d8044a9366d09faac9178b8d5110b86e38e168587008e05ff9711eacd61fbb",
+      "sig_hash": "2a7d3a2f62408a9b2d666d2d12f83c6d8ac4e1342f2fd634e47ff5a50a339eb5"
+    },
+    {
+      "file": "go/funcs05.go",
+      "kind": "fn",
+      "name": "math.add5",
+      "start": 14,
+      "end": 52,
+      "hash": "7e2478d43eeef43dd70060587fba12e62fe18da7803634dba78375c561e019f7",
+      "sig_hash": "2a7d3a2f62408a9b2d666d2d12f83c6d8ac4e1342f2fd634e47ff5a50a339eb5"
+    },
+    {
+      "file": "go/funcs05.go",
+      "kind": "fn",
+      "name": "math.sub5",
+      "start": 54,
+      "end": 92,
+      "hash": "296d62c746bbe9a944e3e3c9be1a9ae923dbc343525d14e83c8029bc78b3d9fc",
+      "sig_hash": "2a7d3a2f62408a9b2d666d2d12f83c6d8ac4e1342f2fd634e47ff5a50a339eb5"
+    },
+    {
+      "file": "go/funcs06.go",
+      "kind": "fn",
+      "name": "math.add6",
+      "start": 14,
+      "end": 52,
+      "hash": "6c89bade52dd79472f331ae185e42392a9df67ed6699fab1de581660147e050b",
+      "sig_hash": "2a7d3a2f62408a9b2d666d2d12f83c6d8ac4e1342f2fd634e47ff5a50a339eb5"
+    },
+    {
+      "file": "go/funcs06.go",
+      "kind": "fn",
+      "name": "math.sub6",
+      "start": 54,
+      "end": 92,
+      "hash": "e98c611fe8acc8e57dbec192f0ed4dc193dfc7715ede6772cc3503a1746fd892",
+      "sig_hash": "2a7d3a2f62408a9b2d666d2d12f83c6d8ac4e1342f2fd634e47ff5a50a339eb5"
+    },
+    {
+      "file": "go/generics.go",
+      "kind": "struct",
+      "name": "coll.Stack",
+      "start": 19,
+      "end": 53,
+      "hash": "625cb33022256d597c60a0ad824c4c1f0e9333634d62fd0f93b3497fb5e55c98",
+      "sig_hash": "46c515dc2b33b87cbe056af28890e15db961b2f57dba70275b510d1a0ad86af9"
+    },
+    {
+      "file": "go/generics.go",
+      "kind": "method",
+      "name": "coll.Stack.Push",
+      "start": 55,
+      "end": 117,
+      "hash": "29a17900e0f3687545230b02a41ccedb51332405f48466278a590fd8269c0cb9",
+      "sig_hash": "bd3c06a5f3122f3660e9d4fb0fe8556e6abc4b50f4bc50910fa49cbad0082077"
+    },
+    {
+      "file": "go/generics.go",
+      "kind": "method",
+      "name": "coll.Stack.Pop",
+      "start": 119,
+      "end": 222,
+      "hash": "3c7fb2fca6147fc7144172c8beb57d58a1c76665ae76984644f766075f1c663e",
+      "sig_hash": "436848c4eb2cc28e13a378d9c42e2b50ff65990e9a59981e014f49fffc7a07ae"
+    },
+    {
+      "file": "go/generics.go",
+      "kind": "fn",
+      "name": "coll.Map",
+      "start": 224,
+      "end": 353,
+      "hash": "22c50636c3563ef5ac8a3c0f41490b4efd8adc7ee7b9a29f1d384393dddfc9aa",
+      "sig_hash": "3c7378bc688400d6c4e537aa5d9191ec36c55e5fd451b2be517f729973c35594"
+    },
+    {
+      "file": "go/ifaces.go",
+      "kind": "interface",
+      "name": "wire.Dialer",
+      "start": 19,
+      "end": 64,
+      "hash": "f4f4df8b244b34901e9fb32cf9acefad919be2d01149c1e6330bb4685e2a5a33",
+      "sig_hash": "398edec9632aee4fd639a1e15e5831c8e0c3ad6ed8a80e48fd2438ff2a705806"
+    },
+    {
+      "file": "go/ifaces.go",
+      "kind": "interface",
+      "name": "wire.Listener",
+      "start": 71,
+      "end": 119,
+      "hash": "2d8433ff7c0c4f02ba38e0e400945c9a1292feb82ab9b68da775b0b51504059a",
+      "sig_hash": "a3a538ff0d471ab006e05ca0e63f212d71fbd997ed2617fe804f0d198d9c9399"
+    },
+    {
+      "file": "go/iota.go",
+      "kind": "const",
+      "name": "flags.Red",
+      "start": 24,
+      "end": 37,
+      "hash": "19641c6c89f90e6a0a364815b26ecada7064a1c7593c5a3963c610ae27e5d17c",
+      "sig_hash": "c56ea715e88324823cce5eedc03f7203e18075bb978f36430ed0c1650e2e15e7"
+    },
+    {
+      "file": "go/iota.go",
+      "kind": "const",
+      "name": "flags.Green",
+      "start": 39,
+      "end": 44,
+      "hash": "38f64fca889f4f7af20b282b5eeec013d776da8e3072031e9c14ca11d724f6c7",
+      "sig_hash": "2cb5663d9c18ae9226900bc496980a9602312a2b9f461cecfd6da4f96e2d7c40"
+    },
+    {
+      "file": "go/iota.go",
+      "kind": "const",
+      "name": "flags.Blue",
+      "start": 46,
+      "end": 50,
+      "hash": "6052a31ce1b5bff12883f78bd1b993d684ce9a1017af20b906fb478829d45bb5",
+      "sig_hash": "902509a04f33a49f3311c4bdfc84247cdd3a4a85739927e076e1135c49042bc7"
+    },
+    {
+      "file": "go/iota.go",
+      "kind": "const",
+      "name": "flags.Read",
+      "start": 63,
+      "end": 82,
+      "hash": "d2779d515530b4862a332db08f907d770d3f4d0b519133b4bd5c16589ebf2f44",
+      "sig_hash": "539b3d4f83adc06cc747700bb213d962ea0090ea5a79431bd28c83682db9434e"
+    },
+    {
+      "file": "go/iota.go",
+      "kind": "const",
+      "name": "flags.Write",
+      "start": 84,
+      "end": 89,
+      "hash": "38f64fca889f4f7af20b282b5eeec013d776da8e3072031e9c14ca11d724f6c7",
+      "sig_hash": "2cb5663d9c18ae9226900bc496980a9602312a2b9f461cecfd6da4f96e2d7c40"
+    },
+    {
+      "file": "go/iota.go",
+      "kind": "const",
+      "name": "flags.Exec",
+      "start": 91,
+      "end": 95,
+      "hash": "6052a31ce1b5bff12883f78bd1b993d684ce9a1017af20b906fb478829d45bb5",
+      "sig_hash": "902509a04f33a49f3311c4bdfc84247cdd3a4a85739927e076e1135c49042bc7"
+    },
+    {
+      "file": "go/methods.go",
+      "kind": "struct",
+      "name": "shapes.Circle",
+      "start": 21,
+      "end": 54,
+      "hash": "df8e9881cc237594887ac54f5856c50b4b51bcd5bf29d77c452d1cb013ff666e",
+      "sig_hash": "18ed85e89bef07c977e42662ddc327bc1dd5fe8edcab9563f1c631ade29680b0"
+    },
+    {
+      "file": "go/methods.go",
+      "kind": "struct",
+      "name": "shapes.Rect",
+      "start": 61,
+      "end": 90,
+      "hash": "493e18c1d0d4144a9dace0727546ec349b2e0d41f9ce2e1bbf83a8abad8d1311",
+      "sig_hash": "4ce9745a0e226677a5400084284e3c08344838a803113b0de650ef52a839bc08"
+    },
+    {
+      "file": "go/methods.go",
+      "kind": "method",
+      "name": "shapes.Circle.Area",
+      "start": 92,
+      "end": 164,
+      "hash": "7228f18ad300253946d378b4c3909ff0c05e04852258c19bcb242c559ad4a513",
+      "sig_hash": "c553c2e7b10a607cf4b5772ed7a84d562d8355bb681b5629cf5a8c934e7eb127"
+    },
+    {
+      "file": "go/methods.go",
+      "kind": "method",
+      "name": "shapes.Rect.Scale",
+      "start": 166,
+      "end": 221,
+      "hash": "4be20efc14def444521cd1da938e8db841ab294ef1ee6a8368db977cf4bc8e1c",
+      "sig_hash": "e6b41cc119a6c48b03a8e193dc1bd6c8d33d755071eb29df0221f43e373fedc5"
+    },
+    {
+      "file": "go/methods.go",
+      "kind": "method",
+      "name": "shapes.Rect.Perimeter",
+      "start": 223,
+      "end": 284,
+      "hash": "6605d6b18b992245ffb6dfd0635de4c76a26e3ead76cf172d27ef07e98c9442c",
+      "sig_hash": "04659e1d1afa58cd8dbef4e17ee985f46d259e0bf424e3bdc540fd70406cafd0"
+    },
+    {
+      "file": "go/mixed.go",
+      "kind": "struct",
+      "name": "mix.Node",
+      "start": 18,
+      "end": 55,
+      "hash": "76e9f9fc1e6eb8b2b339aa66b1e243200ba686b6cf04de06f01d431457b10b72",
+      "sig_hash": "3c1e519231b21af5bfb570ebf2ab82c1fbf6c73b02506e47bad646ef4f02d335"
+    },
+    {
+      "file": "go/mixed.go",
+      "kind": "fn",
+      "name": "mix.NewNode",
+      "start": 57,
+      "end": 108,
+      "hash": "d29bd7fc20f8a786a8db2ec763e8ef8d898f275747b6903989c76d42e7c18a5e",
+      "sig_hash": "3a3b5b14a387bbdfb56736a41a8b6ab04d34373a32499c05a90149a7c3758136"
+    },
+    {
+      "file": "go/mixed.go",
+      "kind": "method",
+      "name": "mix.Node.Append",
+      "start": 110,
+      "end": 221,
+      "hash": "ff1006fc2fce70c16b8a6b17e901e68bb3cb92e5451e8ffbd02862a544fa7228",
+      "sig_hash": "ad867900145353cef8caf452feaa8b01c802adc89b3b8e9411e97340d195e3d9"
+    },
+    {
+      "file": "go/mixed.go",
+      "kind": "const",
+      "name": "mix.MaxNodes",
+      "start": 229,
+      "end": 243,
+      "hash": "93eb4383ca009d43c8afebbbc654e22669783762e685c559afed4acffb9676d2",
+      "sig_hash": "74a2be19d94c2488a48795a901ffde0889bc1703df05225ee16b8b571a04e208"
+    },
+    {
+      "file": "go/mixed.go",
+      "kind": "var",
+      "name": "mix.head",
+      "start": 249,
+      "end": 259,
+      "hash": "1c9a4a790a0dc95fbad91047c92bc2d5314dd4dbf0acf7e2ac81452ade2e4a5a",
+      "sig_hash": "327778066e156640feb0d8d70735cf170ea41c1b96c61dcee74500fa2ed76658"
+    },
+    {
+      "file": "go/multiline.go",
+      "kind": "const",
+      "name": "strs.Text",
+      "start": 20,
+      "end": 44,
+      "hash": "f6affe12c8dde9247a1e0cd0f584d43320efdc5a22370cde329b1961afbb29bc",
+      "sig_hash": "bf7f887457d6ec4b67aef5d319cbd04d21a1d9b69ac8f1b84846b52fe1a36ac7"
+    },
+    {
+      "file": "go/multiline.go",
+      "kind": "const",
+      "name": "strs.Esc",
+      "start": 52,
+      "end": 67,
+      "hash": "9ac77e76b5060e25d3db0a8147c34ae4b1720c5d02095524ff9b7a0b34c3e492",
+      "sig_hash": "013d4df9deaaa7c6a7e38aa4ab08ba9c974f434879d96e793fda88021c7ffcf7"
+    },
+    {
+      "file": "go/other.go",
+      "kind": "fn",
+      "name": "other.Hello",
+      "start": 15,
+      "end": 45,
+      "hash": "f62eb3b1735cb47bbb10a343eff64460264edcc05eeef7d501e8129d8f7e3bbb",
+      "sig_hash": "f2a1f78904c01fa19d627373a2547214b6e1550cb9f92d5710149f2c14dd5080"
+    },
+    {
+      "file": "go/other.go",
+      "kind": "struct",
+      "name": "other.Thing",
+      "start": 52,
+      "end": 75,
+      "hash": "00a3035c706e8a155cc278431ef4f4370898e792764c807f1fb9c71491d9f5dc",
+      "sig_hash": "d053ccc9825a3ab61b51802f4469cfab191e41e7dff29d77b094201695a6742a"
+    },
+    {
+      "file": "go/pack01.go",
+      "kind": "struct",
+      "name": "pack1.S1",
+      "start": 20,
+      "end": 40,
+      "hash": "c36b8d5cdd4f6dde4248b815b73d5c5cd1febbef86256613e5b67cb89de72a7c",
+      "sig_hash": "a829aa1e9db50785316d5f73e75266d5322649502f98f67c5896f5f6e37c402b"
+    },
+    {
+      "file": "go/pack01.go",
+      "kind": "fn",
+      "name": "pack1.F1",
+      "start": 42,
+      "end": 78,
+      "hash": "a88b54114e10e704074b7b20eeab41a8dcef3ef56b2f7ee996739ee5afe73c98",
+      "sig_hash": "4fa9ec23c3c5b34c34f6db584114e52e06d786c0c53b8d9b4d42202edd9e1249"
+    },
+    {
+      "file": "go/pack01.go",
+      "kind": "const",
+      "name": "pack1.K1",
+      "start": 86,
+      "end": 92,
+      "hash": "f1b6e383fc0c83cc837b5d51a44b06a87f1444157efe027edb511356d437b09e",
+      "sig_hash": "2c8bcd1d1ca9b707df40dcc120cc2c05b3a62cbf741d2dfb3ce163385c3cf7c2"
+    },
+    {
+      "file": "go/pack02.go",
+      "kind": "struct",
+      "name": "pack2.S2",
+      "start": 20,
+      "end": 40,
+      "hash": "c36b8d5cdd4f6dde4248b815b73d5c5cd1febbef86256613e5b67cb89de72a7c",
+      "sig_hash": "a829aa1e9db50785316d5f73e75266d5322649502f98f67c5896f5f6e37c402b"
+    },
+    {
+      "file": "go/pack02.go",
+      "kind": "fn",
+      "name": "pack2.F2",
+      "start": 42,
+      "end": 78,
+      "hash": "4d9cce6f470048f5cbe38532dbc5a776e6dc26e92b7ed92161c4d9b418606756",
+      "sig_hash": "4fa9ec23c3c5b34c34f6db584114e52e06d786c0c53b8d9b4d42202edd9e1249"
+    },
+    {
+      "file": "go/pack02.go",
+      "kind": "const",
+      "name": "pack2.K2",
+      "start": 86,
+      "end": 92,
+      "hash": "e598f9343a814ea71a4dc56766b54e68388b969e80e864f0ea08e26ca8fb3ce2",
+      "sig_hash": "6dbde06a930d9658ca98ea7b4e5d7fffa549af43eac0ee8e34d497344ebf7e9e"
+    },
+    {
+      "file": "go/pack03.go",
+      "kind": "struct",
+      "name": "pack3.S3",
+      "start": 20,
+      "end": 40,
+      "hash": "c36b8d5cdd4f6dde4248b815b73d5c5cd1febbef86256613e5b67cb89de72a7c",
+      "sig_hash": "a829aa1e9db50785316d5f73e75266d5322649502f98f67c5896f5f6e37c402b"
+    },
+    {
+      "file": "go/pack03.go",
+      "kind": "fn",
+      "name": "pack3.F3",
+      "start": 42,
+      "end": 78,
+      "hash": "134d8329b17a7ccd1d1d25d44b02356f9be6812658e9e275862b1ba7d6808db4",
+      "sig_hash": "4fa9ec23c3c5b34c34f6db584114e52e06d786c0c53b8d9b4d42202edd9e1249"
+    },
+    {
+      "file": "go/pack03.go",
+      "kind": "const",
+      "name": "pack3.K3",
+      "start": 86,
+      "end": 92,
+      "hash": "bcd0f69d4b167b8babb2ea6b4553ef3243a7d871896911cb31f00c7fa8362ff0",
+      "sig_hash": "c25b9fedb45c5367bdbfa536c084da4fe4d5093c558371e832141d29bb6384c7"
+    },
+    {
+      "file": "go/pack04.go",
+      "kind": "struct",
+      "name": "pack4.S4",
+      "start": 20,
+      "end": 40,
+      "hash": "c36b8d5cdd4f6dde4248b815b73d5c5cd1febbef86256613e5b67cb89de72a7c",
+      "sig_hash": "a829aa1e9db50785316d5f73e75266d5322649502f98f67c5896f5f6e37c402b"
+    },
+    {
+      "file": "go/pack04.go",
+      "kind": "fn",
+      "name": "pack4.F4",
+      "start": 42,
+      "end": 78,
+      "hash": "98304d5860df0fcc1fa37358477cd2adf65b2bb609fdf3b6bd8a11e900d7979d",
+      "sig_hash": "4fa9ec23c3c5b34c34f6db584114e52e06d786c0c53b8d9b4d42202edd9e1249"
+    },
+    {
+      "file": "go/pack04.go",
+      "kind": "const",
+      "name": "pack4.K4",
+      "start": 86,
+      "end": 92,
+      "hash": "02989d40eb479e3df40b9f4281ccdcfbc09006aa468a9c74ae3798c1e9e81eb7",
+      "sig_hash": "f577e912782af1ec6e4830ff3ebe7d5838b9a9b08f958ae03cb00e0a536bd3c6"
+    },
+    {
+      "file": "go/pack05.go",
+      "kind": "struct",
+      "name": "pack5.S5",
+      "start": 20,
+      "end": 40,
+      "hash": "c36b8d5cdd4f6dde4248b815b73d5c5cd1febbef86256613e5b67cb89de72a7c",
+      "sig_hash": "a829aa1e9db50785316d5f73e75266d5322649502f98f67c5896f5f6e37c402b"
+    },
+    {
+      "file": "go/pack05.go",
+      "kind": "fn",
+      "name": "pack5.F5",
+      "start": 42,
+      "end": 78,
+      "hash": "c07b250661fec5c53447487a55f84e6c9d379b2b89a988ec7891f72f70dd88ad",
+      "sig_hash": "4fa9ec23c3c5b34c34f6db584114e52e06d786c0c53b8d9b4d42202edd9e1249"
+    },
+    {
+      "file": "go/pack05.go",
+      "kind": "const",
+      "name": "pack5.K5",
+      "start": 86,
+      "end": 92,
+      "hash": "4eaf48bbbd072d5b415775233e241f633cda7a486c7e7d65ca289419eb7bc471",
+      "sig_hash": "21cc4f4565d8df770cc01f95cebfb20f4ef746bd6d5a85d08052c24b5ba7e821"
+    },
+    {
+      "file": "go/pack06.go",
+      "kind": "struct",
+      "name": "pack6.S6",
+      "start": 20,
+      "end": 40,
+      "hash": "c36b8d5cdd4f6dde4248b815b73d5c5cd1febbef86256613e5b67cb89de72a7c",
+      "sig_hash": "a829aa1e9db50785316d5f73e75266d5322649502f98f67c5896f5f6e37c402b"
+    },
+    {
+      "file": "go/pack06.go",
+      "kind": "fn",
+      "name": "pack6.F6",
+      "start": 42,
+      "end": 78,
+      "hash": "5423750d6471fee5441f73875e243557b8e3988c6e765b991c56601aa26b1081",
+      "sig_hash": "4fa9ec23c3c5b34c34f6db584114e52e06d786c0c53b8d9b4d42202edd9e1249"
+    },
+    {
+      "file": "go/pack06.go",
+      "kind": "const",
+      "name": "pack6.K6",
+      "start": 86,
+      "end": 92,
+      "hash": "611966cee13328d658267bedba13970e0e8bb4799762e333d8f7376446e0a8a7",
+      "sig_hash": "9a4eded101225559e1277f8797fc6ccd7e52056449db962aa79d76d7a35167d0"
+    },
+    {
+      "file": "go/pack07.go",
+      "kind": "struct",
+      "name": "pack7.S7",
+      "start": 20,
+      "end": 40,
+      "hash": "c36b8d5cdd4f6dde4248b815b73d5c5cd1febbef86256613e5b67cb89de72a7c",
+      "sig_hash": "a829aa1e9db50785316d5f73e75266d5322649502f98f67c5896f5f6e37c402b"
+    },
+    {
+      "file": "go/pack07.go",
+      "kind": "fn",
+      "name": "pack7.F7",
+      "start": 42,
+      "end": 78,
+      "hash": "99b0d1f1db3d0b2df6b7a79bf11283a81cd9dbe5dad3856b725eed39945f0118",
+      "sig_hash": "4fa9ec23c3c5b34c34f6db584114e52e06d786c0c53b8d9b4d42202edd9e1249"
+    },
+    {
+      "file": "go/pack07.go",
+      "kind": "const",
+      "name": "pack7.K7",
+      "start": 86,
+      "end": 92,
+      "hash": "ac0931cb80ba18fb5a6f0098216452d6f842404c2a167ece872521d5819739a5",
+      "sig_hash": "8439317343808a0e7980d24ef918778a4463f97bdc829a32a1e44f48cc41c003"
+    },
+    {
+      "file": "go/pack08.go",
+      "kind": "struct",
+      "name": "pack8.S8",
+      "start": 20,
+      "end": 40,
+      "hash": "c36b8d5cdd4f6dde4248b815b73d5c5cd1febbef86256613e5b67cb89de72a7c",
+      "sig_hash": "a829aa1e9db50785316d5f73e75266d5322649502f98f67c5896f5f6e37c402b"
+    },
+    {
+      "file": "go/pack08.go",
+      "kind": "fn",
+      "name": "pack8.F8",
+      "start": 42,
+      "end": 78,
+      "hash": "a938de8aaab47fd89a95a4cd9d05a39d73887b812cf31170d0aef23034e510d8",
+      "sig_hash": "4fa9ec23c3c5b34c34f6db584114e52e06d786c0c53b8d9b4d42202edd9e1249"
+    },
+    {
+      "file": "go/pack08.go",
+      "kind": "const",
+      "name": "pack8.K8",
+      "start": 86,
+      "end": 92,
+      "hash": "8f0b0d50c0ea0d8994b74c3417376b10571fa14922a8dec4ddd3f65fe5e7d145",
+      "sig_hash": "fd7b31c4454c2fd8aa0b34b396d22dc74e654090d023f7dad1bd1f545970b9bf"
+    },
+    {
+      "file": "go/pair_body_a.go",
+      "kind": "fn",
+      "name": "pairex.shrink",
+      "start": 16,
+      "end": 56,
+      "hash": "9139c706066e14236633f33cab4c9475a795cc3fe92ccbcebd7b7e4ad243c393",
+      "sig_hash": "4fa9ec23c3c5b34c34f6db584114e52e06d786c0c53b8d9b4d42202edd9e1249"
+    },
+    {
+      "file": "go/pair_body_b.go",
+      "kind": "fn",
+      "name": "pairex.shrink",
+      "start": 16,
+      "end": 56,
+      "hash": "d23bbae2014dea5859671fdd1d356ab22f3687bf8213ee58870ebe6bff858584",
+      "sig_hash": "4fa9ec23c3c5b34c34f6db584114e52e06d786c0c53b8d9b4d42202edd9e1249"
+    },
+    {
+      "file": "go/pair_field_a.go",
+      "kind": "struct",
+      "name": "pairex.Pair",
+      "start": 21,
+      "end": 63,
+      "hash": "3e809e7add3855d7654997463b08b99eb2b479b535ef91fc76a018b37f295d9e",
+      "sig_hash": "c5e559d17f2b90f0f812709f5a66eb5f049439f0f32801dba561a253188bb7a7"
+    },
+    {
+      "file": "go/pair_field_b.go",
+      "kind": "struct",
+      "name": "pairex.Pair",
+      "start": 21,
+      "end": 63,
+      "hash": "6d571625c007f9919b984740cfe4037a0e3691f752dc3a2865b937c41faf8f6f",
+      "sig_hash": "4eea65d12f4ee0afccca596f5ab9605b749a03803e1329bb5811a1de67716f17"
+    },
+    {
+      "file": "go/pair_param_a.go",
+      "kind": "fn",
+      "name": "pairex.takes",
+      "start": 16,
+      "end": 51,
+      "hash": "7632c1f2566bd0a4c5e66c0889185a86756f8d53d7a14bc67f43d49de2980676",
+      "sig_hash": "4fa9ec23c3c5b34c34f6db584114e52e06d786c0c53b8d9b4d42202edd9e1249"
+    },
+    {
+      "file": "go/pair_param_b.go",
+      "kind": "fn",
+      "name": "pairex.takes",
+      "start": 16,
+      "end": 55,
+      "hash": "c3564b32b31b475a6cf8d2d51b73b48a375e967deb2dd6b813c2ff38d8e62823",
+      "sig_hash": "53b828e606f60a2dc883645f6bc54da33c6debc259f2e6e673e76f1f1c1c3cf9"
+    },
+    {
+      "file": "go/pair_rename_a.go",
+      "kind": "fn",
+      "name": "pairex.fn_a",
+      "start": 16,
+      "end": 64,
+      "hash": "5bee6e5ea4ac5406fb5d017fb0cb007fb4c99bf2b3e5c8ee3883cab2b22d1929",
+      "sig_hash": "a1d6052c67d5100e11343108ab12b1086f60f765a4778e4ce1e2adf2b47ff8bc"
+    },
+    {
+      "file": "go/pair_rename_b.go",
+      "kind": "fn",
+      "name": "pairex.fn_a_renamed",
+      "start": 16,
+      "end": 72,
+      "hash": "5bee6e5ea4ac5406fb5d017fb0cb007fb4c99bf2b3e5c8ee3883cab2b22d1929",
+      "sig_hash": "a1d6052c67d5100e11343108ab12b1086f60f765a4778e4ce1e2adf2b47ff8bc"
+    },
+    {
+      "file": "go/pair_ws_a.go",
+      "kind": "fn",
+      "name": "pairex.spacey",
+      "start": 16,
+      "end": 56,
+      "hash": "a88b54114e10e704074b7b20eeab41a8dcef3ef56b2f7ee996739ee5afe73c98",
+      "sig_hash": "4fa9ec23c3c5b34c34f6db584114e52e06d786c0c53b8d9b4d42202edd9e1249"
+    },
+    {
+      "file": "go/pair_ws_b.go",
+      "kind": "fn",
+      "name": "pairex.spacey",
+      "start": 41,
+      "end": 118,
+      "hash": "a88b54114e10e704074b7b20eeab41a8dcef3ef56b2f7ee996739ee5afe73c98",
+      "sig_hash": "4fa9ec23c3c5b34c34f6db584114e52e06d786c0c53b8d9b4d42202edd9e1249"
+    },
+    {
+      "file": "go/sample.go",
+      "kind": "const",
+      "name": "sample.Answer",
+      "start": 22,
+      "end": 33,
+      "hash": "c59dfda9359644f9e1e16e09fc871167d1b3b148fc8bae2d920fd2916cedddb0",
+      "sig_hash": "fa5837c9d6fdfca7309a36d73f713102aa3353b41ccbb689e5badc21908e7969"
+    },
+    {
+      "file": "go/sample.go",
+      "kind": "struct",
+      "name": "sample.Point",
+      "start": 40,
+      "end": 66,
+      "hash": "933c3c9c6416830315456230e53cb3c0dfb36413371ab1dcda17e754efe27f7a",
+      "sig_hash": "8cac90662b37d201428ec2280e339a4fa2b881c50529db71a6e273de470a2b29"
+    },
+    {
+      "file": "go/sample.go",
+      "kind": "fn",
+      "name": "sample.Add",
+      "start": 68,
+      "end": 108,
+      "hash": "f3b18811972f21be1bae758201300a5e7b84d6e765005698559c73dc6359767b",
+      "sig_hash": "ca29000519507e092fc99784eae48c9d25252abd685946415a5bacce51ee6827"
+    },
+    {
+      "file": "go/sample.go",
+      "kind": "fn",
+      "name": "sample.Mul",
+      "start": 110,
+      "end": 150,
+      "hash": "734fd964e303dd0cb15639ff463ab249fd23b231da931d799dab3f66075703d2",
+      "sig_hash": "ca29000519507e092fc99784eae48c9d25252abd685946415a5bacce51ee6827"
+    },
+    {
+      "file": "go/tests.go",
+      "kind": "test",
+      "name": "checks.test:TestAdd",
+      "start": 34,
+      "end": 106,
+      "hash": "35581776587a41790c5016b83f5ef0d0cfdca83bae519c5cc8cf6d6740e63154",
+      "sig_hash": "6380947dd335318b46f268fb93d891ed895d8322840398457fc34e8358eb8e58"
+    },
+    {
+      "file": "go/tests.go",
+      "kind": "test",
+      "name": "checks.test:TestSub",
+      "start": 108,
+      "end": 179,
+      "hash": "49edb30bf6217f205ff25e77600a368f5f8df1b02ac9da06ca0f1131b1e59636",
+      "sig_hash": "6380947dd335318b46f268fb93d891ed895d8322840398457fc34e8358eb8e58"
+    },
+    {
+      "file": "go/tests.go",
+      "kind": "test",
+      "name": "checks.test:TestMul",
+      "start": 181,
+      "end": 252,
+      "hash": "f5ca21dceddc103461ba44e6f60b1fef1868a30dbe01a377c4aee321fcc8adf3",
+      "sig_hash": "6380947dd335318b46f268fb93d891ed895d8322840398457fc34e8358eb8e58"
+    },
+    {
+      "file": "go/types.go",
+      "kind": "struct",
+      "name": "defs.Config",
+      "start": 19,
+      "end": 59,
+      "hash": "8b6dfd4a29d8545f94d23443e72ef952851ee8486968dea001f1ce30bf82e323",
+      "sig_hash": "7b6d0151ef7697abd0c42132e4d3531df298266e7aba92247deb298de0a3a26a"
+    },
+    {
+      "file": "go/types.go",
+      "kind": "interface",
+      "name": "defs.Reader",
+      "start": 66,
+      "end": 115,
+      "hash": "fa85b5ddd4c416f091ffc6bab7ba764392bb16465469633d6c58e356283de322",
+      "sig_hash": "93b3e9cd3a7ffeb44260446ac974a0d1af3211bd84dc4474bdf014207e611c28"
+    },
+    {
+      "file": "go/types.go",
+      "kind": "interface",
+      "name": "defs.Closer",
+      "start": 122,
+      "end": 157,
+      "hash": "64c56a1c7654d80708517e856c2bf16d2863765521fd1116f18fc8ad2a7ee670",
+      "sig_hash": "baa6d4f021a23fe3b1ee24c84567272ba5cd02fa2d6db6406485b56c9cdc1a14"
+    },
+    {
+      "file": "go/types.go",
+      "kind": "type",
+      "name": "defs.Handle",
+      "start": 164,
+      "end": 177,
+      "hash": "3d2ad0a2cd74a3dc890632c0c6467f03b31ba0485b61c68b5064339791db45c6",
+      "sig_hash": "537189c047534f3d46d776ca00e97b643a3f1bb11348302ad876f473e8143f7d"
+    },
+    {
+      "file": "go/types.go",
+      "kind": "type",
+      "name": "defs.Level",
+      "start": 184,
+      "end": 193,
+      "hash": "4eeb8e2146212ea4a77553d039458ca1a9889520af55adac90902f23066f228d",
+      "sig_hash": "3af2bc7288cc1673a1a5acc33feb99d4b6a96d84910ea43dd3e4f72f48e81560"
+    },
+    {
+      "file": "go/types.go",
+      "kind": "type_alias",
+      "name": "defs.Alias",
+      "start": 200,
+      "end": 214,
+      "hash": "c227f92df1cbaa6547192f55f5716eb5546129da261c82f05e8ee5c1adf7bdf3",
+      "sig_hash": "7ae2692ba9498ae0f3c1b7126b8ee8a7a2ebf6d72e6fcd87cee8ed9282e39c20"
+    },
+    {
+      "file": "go/vars.go",
+      "kind": "var",
+      "name": "state.a",
+      "start": 19,
+      "end": 30,
+      "hash": "4e90a443716e03974f85e302fb14eb9f7e6b67414d079a99861bb999766e84fc",
+      "sig_hash": "4216375eb3edd197a4a77f9160efe9e5098841f28b97541fe69a6b079dc76388"
+    },
+    {
+      "file": "go/vars.go",
+      "kind": "var",
+      "name": "state.b",
+      "start": 19,
+      "end": 30,
+      "hash": "fca3dec5b3572e149d63572f8fdd940bed7b523d88c28151541b875a7c2511bf",
+      "sig_hash": "0ec93bbe6857308482b4c23afb9ab708040ddb08c3ed208d7aa77a145632875c"
+    },
+    {
+      "file": "go/vars.go",
+      "kind": "var",
+      "name": "state.count",
+      "start": 36,
+      "end": 45,
+      "hash": "cd4b04f1f8a01212fad397877604250783c59b639934cfa66323d559cecd1e05",
+      "sig_hash": "02d5be44b015e8a309d4ac26616fdba91eb7ecbe845031c750dc2d474235b091"
+    },
+    {
+      "file": "go/vars.go",
+      "kind": "var",
+      "name": "state.names",
+      "start": 51,
+      "end": 77,
+      "hash": "481a4fc43cb547af88eeea922d0a44a99772f8551aa963bc83c29b913bc2e2b1",
+      "sig_hash": "0152d293ec1d72cceded6114aea1394df20069092e4ee8445bf41d788ef8b26f"
+    },
+    {
+      "file": "go/vars01.go",
+      "kind": "var",
+      "name": "state.V1",
+      "start": 19,
+      "end": 29,
+      "hash": "ce5c560504d6b1ce68bd2681c16185461f9bd34189e9de8d513a0926a63aca60",
+      "sig_hash": "02d5be44b015e8a309d4ac26616fdba91eb7ecbe845031c750dc2d474235b091"
+    },
+    {
+      "file": "go/vars01.go",
+      "kind": "var",
+      "name": "state.W1",
+      "start": 34,
+      "end": 43,
+      "hash": "b304e6927f8aa11129862d36d9a29aa2143fea93d1d5eb62bb3b121d157545f9",
+      "sig_hash": "0152d293ec1d72cceded6114aea1394df20069092e4ee8445bf41d788ef8b26f"
+    },
+    {
+      "file": "go/vars02.go",
+      "kind": "var",
+      "name": "state.V2",
+      "start": 19,
+      "end": 29,
+      "hash": "b7b3e05d32845ff0521955d35cb6bae4a33e665f12ff7954099e85be8fcd0f1f",
+      "sig_hash": "02d5be44b015e8a309d4ac26616fdba91eb7ecbe845031c750dc2d474235b091"
+    },
+    {
+      "file": "go/vars02.go",
+      "kind": "var",
+      "name": "state.W2",
+      "start": 34,
+      "end": 43,
+      "hash": "8510e7a799ceed89e571ca739e40dec10d1d385a72abef2f2943eb4450fbef18",
+      "sig_hash": "0152d293ec1d72cceded6114aea1394df20069092e4ee8445bf41d788ef8b26f"
+    },
+    {
+      "file": "go/vars03.go",
+      "kind": "var",
+      "name": "state.V3",
+      "start": 19,
+      "end": 29,
+      "hash": "f23664af10f8fe9b02e5167c40d4c8df8deb6c68eb23c5b2950e1a8f1783c681",
+      "sig_hash": "02d5be44b015e8a309d4ac26616fdba91eb7ecbe845031c750dc2d474235b091"
+    },
+    {
+      "file": "go/vars03.go",
+      "kind": "var",
+      "name": "state.W3",
+      "start": 34,
+      "end": 43,
+      "hash": "7f2ed94864971e79bebe15213cd3bad6d40b8028fdc37972a4fc127889a435a1",
+      "sig_hash": "0152d293ec1d72cceded6114aea1394df20069092e4ee8445bf41d788ef8b26f"
+    },
+    {
+      "file": "go/vars04.go",
+      "kind": "var",
+      "name": "state.V4",
+      "start": 19,
+      "end": 29,
+      "hash": "0f4fa86701df4cf2eff89e36ceae770d16443841190e2942c3170df409ab43f5",
+      "sig_hash": "02d5be44b015e8a309d4ac26616fdba91eb7ecbe845031c750dc2d474235b091"
+    },
+    {
+      "file": "go/vars04.go",
+      "kind": "var",
+      "name": "state.W4",
+      "start": 34,
+      "end": 43,
+      "hash": "e5cc9a8b89eebf2d004f7d6047ac4e1dda3477f35d4d1b764d990cd9dc16f237",
+      "sig_hash": "0152d293ec1d72cceded6114aea1394df20069092e4ee8445bf41d788ef8b26f"
+    },
+    {
+      "file": "zig/aligns.zig",
+      "kind": "struct",
+      "name": "aligns.Aligned",
+      "start": 0,
+      "end": 67,
+      "hash": "b9ce5abcc2dd49fba0b48d8ec4e91acf80608f98658556aefafb72061d821c30",
+      "sig_hash": "3d7e7e3e042d3a96e172ace56b66e40b4a2c5fa5d4ae9d9cfd966bfa75852a62"
+    },
+    {
+      "file": "zig/aligns.zig",
+      "kind": "var",
+      "name": "aligns.buf",
+      "start": 69,
+      "end": 115,
+      "hash": "eb1293abb51deb5a992a1bdb530828e62d0bbe096457708d8915cd791c45bade",
+      "sig_hash": "56e6258f47ba3c1850ebb7ca137b8ffe4b0804a26ba622d97934e0232a4f4368"
+    },
+    {
+      "file": "zig/anonparam.zig",
+      "kind": "fn",
+      "name": "anonparam.takes",
+      "start": 0,
+      "end": 58,
+      "hash": "5819a85458e0eb2ea563049f05b8bed45b1519e1b95b9f126d3451e64cb1c4dc",
+      "sig_hash": "7bd05b188c209aec01fc31b3d9e9cdb9063f2aff57f371c3adfebbaa689faee3"
+    },
+    {
+      "file": "zig/anonvalue.zig",
+      "kind": "const",
+      "name": "anonvalue.anon",
+      "start": 0,
+      "end": 33,
+      "hash": "f0d8a23d74581d1229ee5b0176dc24e2ba46c5803b6becdbd5dcd00cfe2fe7f6",
+      "sig_hash": "2c8528887e7495ffecbdda4f2b8562636193535391f74350ed9a2608d8eda643"
+    },
+    {
+      "file": "zig/anonvalue.zig",
+      "kind": "const",
+      "name": "anonvalue.table",
+      "start": 35,
+      "end": 82,
+      "hash": "f6196b4e156da92e829a00b403cd2e3568c248a7ee95a1c26fe1b0509e7f79a0",
+      "sig_hash": "d6358f75e6c1473cafd1849dfc265be0378a52fd09321c1df07dc6570b9f43f8"
+    },
+    {
+      "file": "zig/callconv.zig",
+      "kind": "fn",
+      "name": "callconv.handler",
+      "start": 0,
+      "end": 44,
+      "hash": "93c8877c76414332a096cf8cd7388e06e714fee6588b2766af386aa47d738159",
+      "sig_hash": "c067dbc11d596792ecbd4e2d505a49fb5ca2e32699569bae29bcda7cb35a053d"
+    },
+    {
+      "file": "zig/callconv.zig",
+      "kind": "fn",
+      "name": "callconv.local",
+      "start": 46,
+      "end": 96,
+      "hash": "0eef69362b5510623c72d66ecb426520e121b1273d7dab68bacc800404d564e1",
+      "sig_hash": "5e52966e6be42eaf578001730b2ad388dc4cf35ec5bccf7b335d901136846a9e"
+    },
+    {
+      "file": "zig/comments.zig",
+      "kind": "fn",
+      "name": "comments.c",
+      "start": 18,
+      "end": 76,
+      "hash": "bd45264743957a74250a757fcbf543d8dc13cfabfd2f99a24b0b2c00c413d0cd",
+      "sig_hash": "3cfbd287a85959021e269255ad842187d2d8255571bffeaa3f475370aab2a204"
+    },
+    {
+      "file": "zig/containers.zig",
+      "kind": "struct",
+      "name": "containers.Inner",
+      "start": 0,
+      "end": 40,
+      "hash": "47581a54bec6a72debcac9b90d8a6d1a2a39652a0c87ce0132af2b3fe4e3b389",
+      "sig_hash": "9753fa37e7ccb463e99c03c8df0fe1eab674b9a9bbefceb8c7c8b4832e19474b"
+    },
+    {
+      "file": "zig/containers.zig",
+      "kind": "struct",
+      "name": "containers.Packed",
+      "start": 42,
+      "end": 110,
+      "hash": "0877ed91ace75eb2acf20fbe3fbc9ae3fc594713ccd50d872cbd8f5b6a6198fb",
+      "sig_hash": "22683e77089665ca3d76eb25ebdb65417a5ee5ec239d5634da16c2ad7dab26ae"
+    },
+    {
+      "file": "zig/containers.zig",
+      "kind": "struct",
+      "name": "containers.ExternT",
+      "start": 112,
+      "end": 164,
+      "hash": "f0c047fce73abec0aad741869dd40cb087862952fd4662bdee5c282f0cfb612d",
+      "sig_hash": "9326b691a495281c64bfe9fc41fe8d35d75e784d29fb70f0fc80a74e1c2ca50a"
+    },
+    {
+      "file": "zig/containers.zig",
+      "kind": "enum",
+      "name": "containers.Tag",
+      "start": 166,
+      "end": 214,
+      "hash": "cdcae18f45fe0f7a15171f8748a3f12678c45b804156a61b5a376ee9443287ce",
+      "sig_hash": "2c6d5329ff06951d1921a9af8c5a83ef35abf012fbc223bdf859e83847ae7961"
+    },
+    {
+      "file": "zig/containers.zig",
+      "kind": "enum",
+      "name": "containers.NumTag",
+      "start": 216,
+      "end": 270,
+      "hash": "b6b56cdd421dde644312ddca04149acd69da324d37f7a80eda1a25a732aa4560",
+      "sig_hash": "6a2d52cd861266fff923eafc79095aad1643086d1d427625176e073b4cc3646a"
+    },
+    {
+      "file": "zig/containers.zig",
+      "kind": "union",
+      "name": "containers.U",
+      "start": 272,
+      "end": 348,
+      "hash": "06c3e441022f3dc3194ad69645e24d64a7d5bd0aa4e86e418669b8969a214831",
+      "sig_hash": "5f55f496efbba74724d011b93161a4731d0ba9c26d2ca0cf35de1188b3f26b0a"
+    },
+    {
+      "file": "zig/docced.zig",
+      "kind": "struct",
+      "name": "docced.Widget",
+      "start": 48,
+      "end": 93,
+      "hash": "586963d77b7f31a73504491c14cb7fdfb8f6f65905ea2349bd25e0a0a36c3925",
+      "sig_hash": "aa42dfb053fce9a7bc41bb6cd826f5e718dcb1d4ac97b20a2b57949993537bc1"
+    },
+    {
+      "file": "zig/docced.zig",
+      "kind": "fn",
+      "name": "docced.draw",
+      "start": 113,
+      "end": 162,
+      "hash": "79fe6522173b5b54f53de61aef6eba884420462e5f245f4934c3e05d42e115e5",
+      "sig_hash": "5dea4ed41af0dd0fbf0006aab0133aa28cec92ef3a25e07955410bdf41a2f41c"
+    },
+    {
+      "file": "zig/edge.zig",
+      "kind": "const",
+      "name": "edge.weird_text",
+      "start": 0,
+      "end": 77,
+      "hash": "c1f3b6298f90433510434ad8a0a689867e9553b421c263b577df67d663f9dc40",
+      "sig_hash": "3e389dedf9c229335bae75a52e66f3cde56c34a9ab5f595d95d412b80595a421"
+    },
+    {
+      "file": "zig/edge.zig",
+      "kind": "const",
+      "name": "edge.ch",
+      "start": 79,
+      "end": 98,
+      "hash": "730f9590c8b76642bd195cbdd08dbcf99243873439774f94100f1e968844852a",
+      "sig_hash": "255b28e1eb5292c591914c39b5f203099de9e38c56c0bb3e69c0edcde5af90bb"
+    },
+    {
+      "file": "zig/edge.zig",
+      "kind": "fn",
+      "name": "edge.fn",
+      "start": 100,
+      "end": 142,
+      "hash": "b5d9f2d05363c932d57e47aa1713f925d35761ad5ee0346bed88c7affc3e3d9d",
+      "sig_hash": "046b6a9a9a72d0e5f0a4c641f823b23ad891dd812486a1c231a98628ef70cb7e"
+    },
+    {
+      "file": "zig/edge.zig",
+      "kind": "const",
+      "name": "edge.nested",
+      "start": 144,
+      "end": 189,
+      "hash": "83b1a733533db215353f65547237fc562a932816bb6ec5decb3d3f9fa7ad84b0",
+      "sig_hash": "8ab62344b97692c69e61c7c7e83fdf0b2306b8e5d30389849007e2d9a68d4a7d"
+    },
+    {
+      "file": "zig/empty_body.zig",
+      "kind": "fn",
+      "name": "empty_body.nop",
+      "start": 0,
+      "end": 20,
+      "hash": "4d4d89a304d6a9655e71c93478b587256fc497ae3a4e16327edd77eb690f2460",
+      "sig_hash": "8be2739ab277e3319fdcd8379d80e75e34843981efcd90028dcc8392ad04b2b9"
+    },
+    {
+      "file": "zig/empty_body.zig",
+      "kind": "struct",
+      "name": "empty_body.Empty",
+      "start": 22,
+      "end": 50,
+      "hash": "3b24c635fcc743728a1d5b104c56e3225d2dcf712cdf417e7800490e6de24b0c",
+      "sig_hash": "fb32fecd1afc20e6d2b55fa2246c56c61f188d992a0c0f66b78ade08b85250ec"
+    },
+    {
+      "file": "zig/enums.zig",
+      "kind": "enum",
+      "name": "enums.Color",
+      "start": 0,
+      "end": 53,
+      "hash": "6540acc098d1724473fc70f80de0a6e87d2abbf2483d00f298fe4fadb17ceba6",
+      "sig_hash": "3c6916e28fc2f539541136f7e38137154ac52470db36569d8f604ae687b95f35"
+    },
+    {
+      "file": "zig/enums.zig",
+      "kind": "enum",
+      "name": "enums.Mode",
+      "start": 55,
+      "end": 94,
+      "hash": "5f0ae1ca2796121bfc3ed3608520bb7b2626ef14cb01b79a6070057f6f01a6d1",
+      "sig_hash": "96dda329ca1ee9cf36b40c4da72cd9ddae09d43846b1ffd29162843cb5a7a85c"
+    },
+    {
+      "file": "zig/errorret.zig",
+      "kind": "const",
+      "name": "errorret.E",
+      "start": 0,
+      "end": 21,
+      "hash": "ab80425b0c905cb1ae117845ad0e12ece6e6259698c189af0dc5bad52071e659",
+      "sig_hash": "586dec291bd93d27aeb5fe2ebfbe20e6aac107c48121978fe92f111e81408e1c"
+    },
+    {
+      "file": "zig/errorret.zig",
+      "kind": "fn",
+      "name": "errorret.might",
+      "start": 23,
+      "end": 65,
+      "hash": "cd16018953de9a27ad092e9beb1f96352980a670c63b7307d9037f785ebe97e2",
+      "sig_hash": "5eaf1f8426433174f4ee4e22c7e1fb455ab4fe2391aa593dd7624406133a045b"
+    },
+    {
+      "file": "zig/externs.zig",
+      "kind": "var",
+      "name": "externs.global_state",
+      "start": 0,
+      "end": 31,
+      "hash": "1a913490f815a98c1dbfb7584f76a32247cfe61b5c1857185c294eafd5359ed7",
+      "sig_hash": "a9f644c43dc1f4ef6b7e829e8c61a7a1810bcbbf81a6134da08fb96f62f8b622"
+    },
+    {
+      "file": "zig/externs.zig",
+      "kind": "fn",
+      "name": "externs.hook",
+      "start": 33,
+      "end": 59,
+      "hash": "15cfbf77b5152a8b5545278c152413f15565c164ecf34d65e3e87bc16249b990",
+      "sig_hash": "28d22b3b7c954e27f32a35c8be6d4b84f2b850013e3344c2e1ac319847cb3f74"
+    },
+    {
+      "file": "zig/externs.zig",
+      "kind": "const",
+      "name": "externs.proto_done",
+      "start": 61,
+      "end": 82,
+      "hash": "424c983c957e630edee6ffa82b8ab0b30a41b175595e6e03cf684e8494404957",
+      "sig_hash": "29ee4d5d15d33cfcdd98caca7ecf3c96d9fc6ce9ec9d975a9d00887f562347d9"
+    },
+    {
+      "file": "zig/funcs01.zig",
+      "kind": "fn",
+      "name": "funcs01.f1a",
+      "start": 0,
+      "end": 44,
+      "hash": "53316f367e36e2732248c5a4d4fcbf2fb311acb0cb93fca520a059e5f44e433d",
+      "sig_hash": "046b6a9a9a72d0e5f0a4c641f823b23ad891dd812486a1c231a98628ef70cb7e"
+    },
+    {
+      "file": "zig/funcs01.zig",
+      "kind": "fn",
+      "name": "funcs01.f1b",
+      "start": 46,
+      "end": 86,
+      "hash": "9fe6bad8b65c9cd7dfbfa56bc6bfe1a8f81fb12753849f1ea3c0d701255e67af",
+      "sig_hash": "962f118f366ff4eb6c0970f56f53717735a83e758a7254a4b1bfe4fe60ee1252"
+    },
+    {
+      "file": "zig/funcs02.zig",
+      "kind": "fn",
+      "name": "funcs02.f2a",
+      "start": 0,
+      "end": 44,
+      "hash": "2fd971ce69e33128c3171be46d4330af57f3cf8fd607649812e1f37533b51bf4",
+      "sig_hash": "046b6a9a9a72d0e5f0a4c641f823b23ad891dd812486a1c231a98628ef70cb7e"
+    },
+    {
+      "file": "zig/funcs02.zig",
+      "kind": "fn",
+      "name": "funcs02.f2b",
+      "start": 46,
+      "end": 86,
+      "hash": "4033189148dc764d8683a148de9380851e3e074f204bcb30f9ba7222cc15f473",
+      "sig_hash": "962f118f366ff4eb6c0970f56f53717735a83e758a7254a4b1bfe4fe60ee1252"
+    },
+    {
+      "file": "zig/funcs03.zig",
+      "kind": "fn",
+      "name": "funcs03.f3a",
+      "start": 0,
+      "end": 44,
+      "hash": "ab5c58070be45f9ccb28c5e89f8363b6fdd352df224c1b21277f40b100b5dc97",
+      "sig_hash": "046b6a9a9a72d0e5f0a4c641f823b23ad891dd812486a1c231a98628ef70cb7e"
+    },
+    {
+      "file": "zig/funcs03.zig",
+      "kind": "fn",
+      "name": "funcs03.f3b",
+      "start": 46,
+      "end": 86,
+      "hash": "7fa7694c91fa3a1bb68b7345e9e4ed274b82337298908648b6ad8f37ce1c27ea",
+      "sig_hash": "962f118f366ff4eb6c0970f56f53717735a83e758a7254a4b1bfe4fe60ee1252"
+    },
+    {
+      "file": "zig/funcs04.zig",
+      "kind": "fn",
+      "name": "funcs04.f4a",
+      "start": 0,
+      "end": 44,
+      "hash": "3044a757e759a5329531ff723dacc67576698384e8cea645fbff5d74abc3eb5d",
+      "sig_hash": "046b6a9a9a72d0e5f0a4c641f823b23ad891dd812486a1c231a98628ef70cb7e"
+    },
+    {
+      "file": "zig/funcs04.zig",
+      "kind": "fn",
+      "name": "funcs04.f4b",
+      "start": 46,
+      "end": 86,
+      "hash": "4973b54149f2eec31abd289e4d45da96aff97afcf01eda3268beb9f30f7d3b16",
+      "sig_hash": "962f118f366ff4eb6c0970f56f53717735a83e758a7254a4b1bfe4fe60ee1252"
+    },
+    {
+      "file": "zig/funcs05.zig",
+      "kind": "fn",
+      "name": "funcs05.f5a",
+      "start": 0,
+      "end": 44,
+      "hash": "65184e29c5cb0b9246cf8a348f424d118a67fcee3a9b300387fe67e4bb6b151b",
+      "sig_hash": "046b6a9a9a72d0e5f0a4c641f823b23ad891dd812486a1c231a98628ef70cb7e"
+    },
+    {
+      "file": "zig/funcs05.zig",
+      "kind": "fn",
+      "name": "funcs05.f5b",
+      "start": 46,
+      "end": 86,
+      "hash": "ac75fd7cab3ce7a29fe5e150fdc39cdb9b3c4f45cd60ac448c864fe306fb6ed8",
+      "sig_hash": "962f118f366ff4eb6c0970f56f53717735a83e758a7254a4b1bfe4fe60ee1252"
+    },
+    {
+      "file": "zig/funcs06.zig",
+      "kind": "fn",
+      "name": "funcs06.f6a",
+      "start": 0,
+      "end": 44,
+      "hash": "07186785fb281e285e23328a8564ed378d44acd3cd5b78b36beef5c36bc62608",
+      "sig_hash": "046b6a9a9a72d0e5f0a4c641f823b23ad891dd812486a1c231a98628ef70cb7e"
+    },
+    {
+      "file": "zig/funcs06.zig",
+      "kind": "fn",
+      "name": "funcs06.f6b",
+      "start": 46,
+      "end": 86,
+      "hash": "be9819dee9944c213b9206137ed20e377e67bcb3c23130e5a53b6d388084a029",
+      "sig_hash": "962f118f366ff4eb6c0970f56f53717735a83e758a7254a4b1bfe4fe60ee1252"
+    },
+    {
+      "file": "zig/multiline.zig",
+      "kind": "const",
+      "name": "multiline.banner",
+      "start": 0,
+      "end": 79,
+      "hash": "769c0f8c4f878e1f653a0dbbf0335b4d92f50822250260192806623d6914d7db",
+      "sig_hash": "57a3d320597463ef87815a5f01683f0fd56f558f2824636052e5f5e7ff77ecea"
+    },
+    {
+      "file": "zig/multiline.zig",
+      "kind": "fn",
+      "name": "multiline.greet",
+      "start": 81,
+      "end": 129,
+      "hash": "0c90d259bb24149879fe9d9bfb99863a5fd4c0a67c0b039cf5b60bd0bc23dd64",
+      "sig_hash": "97ae7ae47d813e050d6ff1ed7e2bbfa5321d70e1da01e6cb5b29993f2b52be17"
+    },
+    {
+      "file": "zig/nested_container.zig",
+      "kind": "struct",
+      "name": "nested_container.Outer",
+      "start": 0,
+      "end": 72,
+      "hash": "f8bf21769e01b08314e40edfa22a82bbdeff8060e67c7af8f55d22af2ae30fb0",
+      "sig_hash": "cc5a21cbc58acf3973f0d1da8c477f3a38566b1670e2ee4a935f4111b409a9a5"
+    },
+    {
+      "file": "zig/pack01.zig",
+      "kind": "struct",
+      "name": "pack01.S1",
+      "start": 0,
+      "end": 38,
+      "hash": "7ab1a81a710a0c41a5e1f49279fa2497d213fefc0bc279c60c77dc891d3c711f",
+      "sig_hash": "83e1babb5196ec525f04f337161fd6b8e85dbce99d20fdf8ec8bbf11f6d76910"
+    },
+    {
+      "file": "zig/pack01.zig",
+      "kind": "fn",
+      "name": "pack01.p1",
+      "start": 40,
+      "end": 83,
+      "hash": "53316f367e36e2732248c5a4d4fcbf2fb311acb0cb93fca520a059e5f44e433d",
+      "sig_hash": "046b6a9a9a72d0e5f0a4c641f823b23ad891dd812486a1c231a98628ef70cb7e"
+    },
+    {
+      "file": "zig/pack01.zig",
+      "kind": "const",
+      "name": "pack01.k1",
+      "start": 85,
+      "end": 98,
+      "hash": "424c983c957e630edee6ffa82b8ab0b30a41b175595e6e03cf684e8494404957",
+      "sig_hash": "29ee4d5d15d33cfcdd98caca7ecf3c96d9fc6ce9ec9d975a9d00887f562347d9"
+    },
+    {
+      "file": "zig/pack02.zig",
+      "kind": "struct",
+      "name": "pack02.S2",
+      "start": 0,
+      "end": 38,
+      "hash": "7ab1a81a710a0c41a5e1f49279fa2497d213fefc0bc279c60c77dc891d3c711f",
+      "sig_hash": "83e1babb5196ec525f04f337161fd6b8e85dbce99d20fdf8ec8bbf11f6d76910"
+    },
+    {
+      "file": "zig/pack02.zig",
+      "kind": "fn",
+      "name": "pack02.p2",
+      "start": 40,
+      "end": 83,
+      "hash": "2fd971ce69e33128c3171be46d4330af57f3cf8fd607649812e1f37533b51bf4",
+      "sig_hash": "046b6a9a9a72d0e5f0a4c641f823b23ad891dd812486a1c231a98628ef70cb7e"
+    },
+    {
+      "file": "zig/pack02.zig",
+      "kind": "const",
+      "name": "pack02.k2",
+      "start": 85,
+      "end": 98,
+      "hash": "5ffa8ddaddd2e3a6def262a73b32fb22b7b5f11f49cf010fed8a9d22fe36974a",
+      "sig_hash": "e683e44442bf93e2854c59055bd5cbbaa7728a18c678ac73e9d6265539009fb6"
+    },
+    {
+      "file": "zig/pack03.zig",
+      "kind": "struct",
+      "name": "pack03.S3",
+      "start": 0,
+      "end": 38,
+      "hash": "7ab1a81a710a0c41a5e1f49279fa2497d213fefc0bc279c60c77dc891d3c711f",
+      "sig_hash": "83e1babb5196ec525f04f337161fd6b8e85dbce99d20fdf8ec8bbf11f6d76910"
+    },
+    {
+      "file": "zig/pack03.zig",
+      "kind": "fn",
+      "name": "pack03.p3",
+      "start": 40,
+      "end": 83,
+      "hash": "ab5c58070be45f9ccb28c5e89f8363b6fdd352df224c1b21277f40b100b5dc97",
+      "sig_hash": "046b6a9a9a72d0e5f0a4c641f823b23ad891dd812486a1c231a98628ef70cb7e"
+    },
+    {
+      "file": "zig/pack03.zig",
+      "kind": "const",
+      "name": "pack03.k3",
+      "start": 85,
+      "end": 98,
+      "hash": "9cd3c5baa1e0cd0e2e1f5f342494478a99acf4f554c494414afcff376c6bec85",
+      "sig_hash": "f0386945dafc3774cb5010dc11584dece1d7d4b39096d646c545a4081ba39e4a"
+    },
+    {
+      "file": "zig/pack04.zig",
+      "kind": "struct",
+      "name": "pack04.S4",
+      "start": 0,
+      "end": 38,
+      "hash": "7ab1a81a710a0c41a5e1f49279fa2497d213fefc0bc279c60c77dc891d3c711f",
+      "sig_hash": "83e1babb5196ec525f04f337161fd6b8e85dbce99d20fdf8ec8bbf11f6d76910"
+    },
+    {
+      "file": "zig/pack04.zig",
+      "kind": "fn",
+      "name": "pack04.p4",
+      "start": 40,
+      "end": 83,
+      "hash": "3044a757e759a5329531ff723dacc67576698384e8cea645fbff5d74abc3eb5d",
+      "sig_hash": "046b6a9a9a72d0e5f0a4c641f823b23ad891dd812486a1c231a98628ef70cb7e"
+    },
+    {
+      "file": "zig/pack04.zig",
+      "kind": "const",
+      "name": "pack04.k4",
+      "start": 85,
+      "end": 98,
+      "hash": "449c126b77b18c15b109da74d34e74ffe6f7799edf05fed66f61cf63b0c58b06",
+      "sig_hash": "7e07f98419ca55d400d9da0e6c86e9ee36beb4342eae0454033d9fd29c6a7850"
+    },
+    {
+      "file": "zig/pack05.zig",
+      "kind": "struct",
+      "name": "pack05.S5",
+      "start": 0,
+      "end": 38,
+      "hash": "7ab1a81a710a0c41a5e1f49279fa2497d213fefc0bc279c60c77dc891d3c711f",
+      "sig_hash": "83e1babb5196ec525f04f337161fd6b8e85dbce99d20fdf8ec8bbf11f6d76910"
+    },
+    {
+      "file": "zig/pack05.zig",
+      "kind": "fn",
+      "name": "pack05.p5",
+      "start": 40,
+      "end": 83,
+      "hash": "65184e29c5cb0b9246cf8a348f424d118a67fcee3a9b300387fe67e4bb6b151b",
+      "sig_hash": "046b6a9a9a72d0e5f0a4c641f823b23ad891dd812486a1c231a98628ef70cb7e"
+    },
+    {
+      "file": "zig/pack05.zig",
+      "kind": "const",
+      "name": "pack05.k5",
+      "start": 85,
+      "end": 98,
+      "hash": "fab81f2781545d7f979ab9c3dfee7539ff465f90fda75ac03efa2315ce125be2",
+      "sig_hash": "098aa16382e1fb5ea6941a87dbd3d85d362b3ef5e2a1c4abc052ab4d37f7f7ea"
+    },
+    {
+      "file": "zig/pack06.zig",
+      "kind": "struct",
+      "name": "pack06.S6",
+      "start": 0,
+      "end": 38,
+      "hash": "7ab1a81a710a0c41a5e1f49279fa2497d213fefc0bc279c60c77dc891d3c711f",
+      "sig_hash": "83e1babb5196ec525f04f337161fd6b8e85dbce99d20fdf8ec8bbf11f6d76910"
+    },
+    {
+      "file": "zig/pack06.zig",
+      "kind": "fn",
+      "name": "pack06.p6",
+      "start": 40,
+      "end": 83,
+      "hash": "07186785fb281e285e23328a8564ed378d44acd3cd5b78b36beef5c36bc62608",
+      "sig_hash": "046b6a9a9a72d0e5f0a4c641f823b23ad891dd812486a1c231a98628ef70cb7e"
+    },
+    {
+      "file": "zig/pack06.zig",
+      "kind": "const",
+      "name": "pack06.k6",
+      "start": 85,
+      "end": 98,
+      "hash": "b7c1ec953b4cac3ff1682dd13da3ea5f4860c29c85abf728b108f2ed290f64e3",
+      "sig_hash": "c5d7e97a66c5be4d5efdc1a235afb485f2069a55a3e6d10244fd10b59a491468"
+    },
+    {
+      "file": "zig/pack07.zig",
+      "kind": "struct",
+      "name": "pack07.S7",
+      "start": 0,
+      "end": 38,
+      "hash": "7ab1a81a710a0c41a5e1f49279fa2497d213fefc0bc279c60c77dc891d3c711f",
+      "sig_hash": "83e1babb5196ec525f04f337161fd6b8e85dbce99d20fdf8ec8bbf11f6d76910"
+    },
+    {
+      "file": "zig/pack07.zig",
+      "kind": "fn",
+      "name": "pack07.p7",
+      "start": 40,
+      "end": 83,
+      "hash": "1704b279debc8563f4c475508c63357eda52ca57e31dde51be3c0dd21f0c5d48",
+      "sig_hash": "046b6a9a9a72d0e5f0a4c641f823b23ad891dd812486a1c231a98628ef70cb7e"
+    },
+    {
+      "file": "zig/pack07.zig",
+      "kind": "const",
+      "name": "pack07.k7",
+      "start": 85,
+      "end": 98,
+      "hash": "c29429eeea15b8e85508ce8628d4a910b712b20749015e479663b73c1dcc0ce5",
+      "sig_hash": "c54765f5950430e22d8131f14cc2edcad287f39e2e20bb8c42ea246c4914d3c8"
+    },
+    {
+      "file": "zig/pack08.zig",
+      "kind": "struct",
+      "name": "pack08.S8",
+      "start": 0,
+      "end": 38,
+      "hash": "7ab1a81a710a0c41a5e1f49279fa2497d213fefc0bc279c60c77dc891d3c711f",
+      "sig_hash": "83e1babb5196ec525f04f337161fd6b8e85dbce99d20fdf8ec8bbf11f6d76910"
+    },
+    {
+      "file": "zig/pack08.zig",
+      "kind": "fn",
+      "name": "pack08.p8",
+      "start": 40,
+      "end": 83,
+      "hash": "8151453a2a6cc6c6e492f662c76be754660ea2fbac162c57c171d40598100dca",
+      "sig_hash": "046b6a9a9a72d0e5f0a4c641f823b23ad891dd812486a1c231a98628ef70cb7e"
+    },
+    {
+      "file": "zig/pack08.zig",
+      "kind": "const",
+      "name": "pack08.k8",
+      "start": 85,
+      "end": 98,
+      "hash": "96004865cab49c38bb5f37954153d769be9daa3cc7c52638af3255053651bf4f",
+      "sig_hash": "1be3bc0efff3c88448024ec9f675b94ef0dd4ba5979ecd6a73f4d01379d2ac54"
+    },
+    {
+      "file": "zig/pair_body_a.zig",
+      "kind": "fn",
+      "name": "pair_body_a.shrink",
+      "start": 0,
+      "end": 47,
+      "hash": "2fb2405464c69d6e23c5b6e2369e73d1fd88cc349007b60e90a4e535d5059c64",
+      "sig_hash": "046b6a9a9a72d0e5f0a4c641f823b23ad891dd812486a1c231a98628ef70cb7e"
+    },
+    {
+      "file": "zig/pair_body_b.zig",
+      "kind": "fn",
+      "name": "pair_body_b.shrink",
+      "start": 0,
+      "end": 47,
+      "hash": "2de5617ed6998ef4f2e81c75b0d1c207d3a99a9efbd89871ec3956baba205dc6",
+      "sig_hash": "046b6a9a9a72d0e5f0a4c641f823b23ad891dd812486a1c231a98628ef70cb7e"
+    },
+    {
+      "file": "zig/pair_field_a.zig",
+      "kind": "struct",
+      "name": "pair_field_a.Pair",
+      "start": 0,
+      "end": 68,
+      "hash": "0298fac30c4e8e887fb8e51e92dca7af8ae4d400a890e11b8c1fbc7db8593c7e",
+      "sig_hash": "2aef188c4eaf722fde1bb0b5da7cfc5b1805a5d75f6c22e04034ebcce4bb011a"
+    },
+    {
+      "file": "zig/pair_field_b.zig",
+      "kind": "struct",
+      "name": "pair_field_b.Pair",
+      "start": 0,
+      "end": 68,
+      "hash": "51048aee821ba88c435b2d521367dd45eb76d31b9be0345043778c55923c9239",
+      "sig_hash": "2a131dd6681736cf41f902d3e408938587c048af554d2c127c413074f0ff2fff"
+    },
+    {
+      "file": "zig/pair_param_a.zig",
+      "kind": "fn",
+      "name": "pair_param_a.takes",
+      "start": 0,
+      "end": 42,
+      "hash": "b5d9f2d05363c932d57e47aa1713f925d35761ad5ee0346bed88c7affc3e3d9d",
+      "sig_hash": "046b6a9a9a72d0e5f0a4c641f823b23ad891dd812486a1c231a98628ef70cb7e"
+    },
+    {
+      "file": "zig/pair_param_b.zig",
+      "kind": "fn",
+      "name": "pair_param_b.takes",
+      "start": 0,
+      "end": 42,
+      "hash": "4fe1f49a1c08f226aea867de493d9b8b4ebf18be286034004d86b8a538af1fc0",
+      "sig_hash": "3f84bc5d48e9cf586bce2d6f78ce8d14c1a0f2a58434d137cf7f06a4eac607ca"
+    },
+    {
+      "file": "zig/pair_rename_a.zig",
+      "kind": "fn",
+      "name": "pair_rename_a.fn_a",
+      "start": 0,
+      "end": 57,
+      "hash": "d7c8f2b52606b851d77620f9f3fa0bf6fcd437a785b261964a101602a52d0aba",
+      "sig_hash": "e5b0f9d645b94b0bb417ee357e3827510435cbec991377b6a9ea7f1852ad55e3"
+    },
+    {
+      "file": "zig/pair_rename_b.zig",
+      "kind": "fn",
+      "name": "pair_rename_b.fn_a_renamed",
+      "start": 0,
+      "end": 65,
+      "hash": "d7c8f2b52606b851d77620f9f3fa0bf6fcd437a785b261964a101602a52d0aba",
+      "sig_hash": "e5b0f9d645b94b0bb417ee357e3827510435cbec991377b6a9ea7f1852ad55e3"
+    },
+    {
+      "file": "zig/pair_ws_a.zig",
+      "kind": "fn",
+      "name": "pair_ws_a.spacey",
+      "start": 0,
+      "end": 47,
+      "hash": "53316f367e36e2732248c5a4d4fcbf2fb311acb0cb93fca520a059e5f44e433d",
+      "sig_hash": "046b6a9a9a72d0e5f0a4c641f823b23ad891dd812486a1c231a98628ef70cb7e"
+    },
+    {
+      "file": "zig/pair_ws_b.zig",
+      "kind": "fn",
+      "name": "pair_ws_b.spacey",
+      "start": 21,
+      "end": 98,
+      "hash": "53316f367e36e2732248c5a4d4fcbf2fb311acb0cb93fca520a059e5f44e433d",
+      "sig_hash": "046b6a9a9a72d0e5f0a4c641f823b23ad891dd812486a1c231a98628ef70cb7e"
+    },
+    {
+      "file": "zig/protos.zig",
+      "kind": "fn",
+      "name": "protos.api_one",
+      "start": 0,
+      "end": 30,
+      "hash": "5665ca9d628afa7056f70438c479af5a57dc34740f0bf1039e488fadc4f221dc",
+      "sig_hash": "e5e43dcd7c72ba882dbc1a02f5cc49f20c4c23e92b2c45f05da242f50eddc41c"
+    },
+    {
+      "file": "zig/protos.zig",
+      "kind": "fn",
+      "name": "protos.api_two",
+      "start": 31,
+      "end": 56,
+      "hash": "8421caa4c38551793baf50b8889fd8c4efea133d7d3fc8311527dba6111a6699",
+      "sig_hash": "c91a8516c3b4aa3f196985c3f32ace55795318558ade2506b4c220a7affd2dea"
+    },
+    {
+      "file": "zig/protos.zig",
+      "kind": "fn",
+      "name": "protos.api_three",
+      "start": 57,
+      "end": 90,
+      "hash": "62d9ac3f356507bc20c3e8efd9a3254ee94ec29aa474efff662a096aa4ad3b0c",
+      "sig_hash": "6ca0b62fc9ee84de95c261b62e64433d9925340d3c164a892c3dd874fda8abe3"
+    },
+    {
+      "file": "zig/quals.zig",
+      "kind": "fn",
+      "name": "quals.one",
+      "start": 0,
+      "end": 20,
+      "hash": "4d4d89a304d6a9655e71c93478b587256fc497ae3a4e16327edd77eb690f2460",
+      "sig_hash": "8be2739ab277e3319fdcd8379d80e75e34843981efcd90028dcc8392ad04b2b9"
+    },
+    {
+      "file": "zig/quals.zig",
+      "kind": "fn",
+      "name": "quals.two",
+      "start": 21,
+      "end": 44,
+      "hash": "b4b26748eafbb8c0bdc0f9a265d6c1cc3515228409ba31892fbd31e199d9e1e7",
+      "sig_hash": "2bcc332194fbfb4a23a9785ad30cfc01496e3d92691dbc436749d6e9c22ca068"
+    },
+    {
+      "file": "zig/quals.zig",
+      "kind": "fn",
+      "name": "quals.three",
+      "start": 45,
+      "end": 68,
+      "hash": "8421caa4c38551793baf50b8889fd8c4efea133d7d3fc8311527dba6111a6699",
+      "sig_hash": "c91a8516c3b4aa3f196985c3f32ace55795318558ade2506b4c220a7affd2dea"
+    },
+    {
+      "file": "zig/quals.zig",
+      "kind": "fn",
+      "name": "quals.four",
+      "start": 69,
+      "end": 113,
+      "hash": "7e4f10209842f215bab4a1aab36290313a09fa4708d92c43c202ddbeda2e4f17",
+      "sig_hash": "e456a60879a01827daea46af62b8f6abd808483a096f4da81690bb9b1c40699e"
+    },
+    {
+      "file": "zig/quals.zig",
+      "kind": "fn",
+      "name": "quals.five",
+      "start": 114,
+      "end": 140,
+      "hash": "5166abe3d2e44112b43b0d5d72bdbe286f9ed3a6645a6aefc92f025b55a5f0a6",
+      "sig_hash": "881ad7a0dbf71db68669f190ac4280e2cf49ce55bc0d0fde49249c5794ec36ef"
+    },
+    {
+      "file": "zig/quals.zig",
+      "kind": "fn",
+      "name": "quals.six",
+      "start": 141,
+      "end": 166,
+      "hash": "9a976a70f43c349ab55a3b1a7e4202df71658da89489797df80acaeb437295f0",
+      "sig_hash": "05644fee4fbaccddbc4763a2db65cdc8bb1ca37aff31acabd2fa48c969703807"
+    },
+    {
+      "file": "zig/quals.zig",
+      "kind": "var",
+      "name": "quals.counter",
+      "start": 167,
+      "end": 200,
+      "hash": "637a9010a114e7932456fba255ae8ae5604feb220938bf901a0b656fefedf780",
+      "sig_hash": "2530da5e4a6197f895d0ab8fbefa6efedccf5307e964be20ab352ae55c0e86f3"
+    },
+    {
+      "file": "zig/sample.zig",
+      "kind": "const",
+      "name": "sample.limit",
+      "start": 0,
+      "end": 18,
+      "hash": "4bb9c288740f272e0625efb56eca79065fac872ddf5ca7631374a0cf1466129c",
+      "sig_hash": "8647a5bfc4dad2be53eba5c92b2ebf21fc77632b01de5d7212abafae7822f7df"
+    },
+    {
+      "file": "zig/sample.zig",
+      "kind": "struct",
+      "name": "sample.Point",
+      "start": 20,
+      "end": 73,
+      "hash": "e90bc25491fc701003c01d3b357576307f5ef1e56f8a2f24e1d0547208b30ba5",
+      "sig_hash": "db9ee92e78dc348dd4fd4540893ae4bf4e9ef408e2f3bf5aeaac89baa537e073"
+    },
+    {
+      "file": "zig/sample.zig",
+      "kind": "fn",
+      "name": "sample.add",
+      "start": 75,
+      "end": 127,
+      "hash": "297990f6a12d41e281c834016934711b719b8df22da672ca1eb77532478315e9",
+      "sig_hash": "ebb03f9e04410e56bf22ea768f78297c60e94675ef9e4f7e80a94de527c4a859"
+    },
+    {
+      "file": "zig/sample.zig",
+      "kind": "fn",
+      "name": "sample.helper",
+      "start": 129,
+      "end": 172,
+      "hash": "df0d8a50da63773e8640c18cea056ab867f38fd67c2a3dc27d3ef40e2572f8d8",
+      "sig_hash": "962f118f366ff4eb6c0970f56f53717735a83e758a7254a4b1bfe4fe60ee1252"
+    },
+    {
+      "file": "zig/sample.zig",
+      "kind": "fn",
+      "name": "sample.entry",
+      "start": 174,
+      "end": 199,
+      "hash": "b4b26748eafbb8c0bdc0f9a265d6c1cc3515228409ba31892fbd31e199d9e1e7",
+      "sig_hash": "2bcc332194fbfb4a23a9785ad30cfc01496e3d92691dbc436749d6e9c22ca068"
+    },
+    {
+      "file": "zig/sample.zig",
+      "kind": "test",
+      "name": "sample.test:add works",
+      "start": 201,
+      "end": 257,
+      "hash": "bfad5b2dc13c5acc6519db6f0b85d1e7b41be98f2694348e4b89fd7c829f38ca",
+      "sig_hash": "7c6f6d22beaebe84742e48433c2404eead615b5a15592d5b179b4f3481a88fb7"
+    },
+    {
+      "file": "zig/secondpkg.zig",
+      "kind": "fn",
+      "name": "secondpkg.other",
+      "start": 0,
+      "end": 36,
+      "hash": "d8656766cc7854c430c15862cf42991dddef5e73551436cfb350864202debe25",
+      "sig_hash": "3cfbd287a85959021e269255ad842187d2d8255571bffeaa3f475370aab2a204"
+    },
+    {
+      "file": "zig/secondpkg.zig",
+      "kind": "struct",
+      "name": "secondpkg.OC",
+      "start": 38,
+      "end": 72,
+      "hash": "d2fad0503d05e09a8a1c076a13e5d345039b8078de538f94f86369ec84bd6b7c",
+      "sig_hash": "b004bb3b0f0f10f652dadb886945ecd7793286cec155507eb940a02bb52cdc19"
+    },
+    {
+      "file": "zig/tests.zig",
+      "kind": "test",
+      "name": "tests.test:first case",
+      "start": 0,
+      "end": 49,
+      "hash": "2166044dfe46bdb26cb25383e7bf8433a940be38ca511a1f15cf08e4bf636e8e",
+      "sig_hash": "7c6f6d22beaebe84742e48433c2404eead615b5a15592d5b179b4f3481a88fb7"
+    },
+    {
+      "file": "zig/tests.zig",
+      "kind": "test",
+      "name": "tests.test:second case",
+      "start": 51,
+      "end": 101,
+      "hash": "76326e612f059729a0d6fb1d4c3d6c2c14cfeaef762ea7d09e64fd58199d8e66",
+      "sig_hash": "7c6f6d22beaebe84742e48433c2404eead615b5a15592d5b179b4f3481a88fb7"
+    },
+    {
+      "file": "zig/tests.zig",
+      "kind": "test",
+      "name": "tests.test:third case",
+      "start": 103,
+      "end": 152,
+      "hash": "912421b13a429a261746e5fd1d3c623c23fe7aeae99924f0e0471023190992cc",
+      "sig_hash": "7c6f6d22beaebe84742e48433c2404eead615b5a15592d5b179b4f3481a88fb7"
+    },
+    {
+      "file": "zig/types.zig",
+      "kind": "const",
+      "name": "types.Handle",
+      "start": 0,
+      "end": 23,
+      "hash": "f093173e13faeb9b6ad4ca74bccbe32b216ce14f6aebf9e400bf0526d4fc61e9",
+      "sig_hash": "82e956b90392a64faf2b3bf0559b9eb47610344f9be4af0d90e998b02171ee62"
+    },
+    {
+      "file": "zig/types.zig",
+      "kind": "const",
+      "name": "types.Byte",
+      "start": 24,
+      "end": 44,
+      "hash": "4724f4e3da2308f5dd8f3ff2b22da6b3e46f40aad0e330e0833c840a74a56bec",
+      "sig_hash": "85bfaee53186780ce80d95a5c6c890aa449a088d15480cdce0276cf6adf3226f"
+    },
+    {
+      "file": "zig/types.zig",
+      "kind": "const",
+      "name": "types.ErrSet",
+      "start": 45,
+      "end": 82,
+      "hash": "f3fc0d27555f60d13a4ba5526f5d52c8b2e7d71a39435089839d8f59d5190c3e",
+      "sig_hash": "5c23d813c935a961a2bef9263393ff28abd5f61d835ddd885d260e6c58ee7434"
+    },
+    {
+      "file": "zig/types.zig",
+      "kind": "const",
+      "name": "types.FnType",
+      "start": 83,
+      "end": 115,
+      "hash": "03e3381997ec7ea884b9dc900b774c63f6e8b6a0518453e6941a12e23b801760",
+      "sig_hash": "9255e73e26c3f0495bcb4ae235aa1fb6dd679b9e17e43af23c98abe92d6968cd"
+    },
+    {
+      "file": "zig/unionflat.zig",
+      "kind": "union",
+      "name": "unionflat.Value",
+      "start": 0,
+      "end": 70,
+      "hash": "317f0217f569dfda4f23bd0af4ab08fe1c5ca6f252d84ac62f2bc36abc335aee",
+      "sig_hash": "7d049de5676626607c1e57478d071ba32688529cfef2ee1bf4934541b6879ec6"
+    },
+    {
+      "file": "zig/unionflat.zig",
+      "kind": "union",
+      "name": "unionflat.Opt",
+      "start": 72,
+      "end": 119,
+      "hash": "d54530deccd1b744181458c18e3fdb9501d66332f83cefa639a5168ab7f1db52",
+      "sig_hash": "0e1f30bff45af275a765437bc1f78e115832915d457c8048a4e7ec425a082016"
+    },
+    {
+      "file": "zig/vars01.zig",
+      "kind": "var",
+      "name": "vars01.v1a",
+      "start": 0,
+      "end": 21,
+      "hash": "34cb6e020d87fb6676392a263b9844408e55dd5a563adb527c7a041d76f2a6a8",
+      "sig_hash": "ccd1215c5b2678274c57906a8bc3b443222270b6157d77a300f8317d064bd5b8"
+    },
+    {
+      "file": "zig/vars01.zig",
+      "kind": "var",
+      "name": "vars01.v1b",
+      "start": 22,
+      "end": 46,
+      "hash": "762beca27744c743f48094db20e97df9ef7bad53f12dbfb79e337c0e08055d08",
+      "sig_hash": "f03887fff9b7f84667e463f555013ce57594cb212b0316d938a718edec2fc548"
+    },
+    {
+      "file": "zig/vars01.zig",
+      "kind": "const",
+      "name": "vars01.c1a",
+      "start": 47,
+      "end": 65,
+      "hash": "6045131f85eab0c1d084b4459e4967d6f9a30572d6a123a65e0183832fcecd37",
+      "sig_hash": "2bcebf86c0a3eb9487698671b78711cb4bd9ce40c5be4206f4a37e4e72044388"
+    },
+    {
+      "file": "zig/vars01.zig",
+      "kind": "const",
+      "name": "vars01.c1b",
+      "start": 66,
+      "end": 87,
+      "hash": "9e8cdf17c30922ac2eb277763bb534f9d5a673a7c775882e3171b3c40c5a961b",
+      "sig_hash": "f8300c067bf9fd2391b565adb59a7382df936062b27181bb14db862f6488860c"
+    },
+    {
+      "file": "zig/vars02.zig",
+      "kind": "var",
+      "name": "vars02.v2a",
+      "start": 0,
+      "end": 21,
+      "hash": "ea02af4ee79aa7b7517d58d8a5d5a53e842d92a81492f3edefec58ef99039586",
+      "sig_hash": "ccd1215c5b2678274c57906a8bc3b443222270b6157d77a300f8317d064bd5b8"
+    },
+    {
+      "file": "zig/vars02.zig",
+      "kind": "var",
+      "name": "vars02.v2b",
+      "start": 22,
+      "end": 46,
+      "hash": "762beca27744c743f48094db20e97df9ef7bad53f12dbfb79e337c0e08055d08",
+      "sig_hash": "f03887fff9b7f84667e463f555013ce57594cb212b0316d938a718edec2fc548"
+    },
+    {
+      "file": "zig/vars02.zig",
+      "kind": "const",
+      "name": "vars02.c2a",
+      "start": 47,
+      "end": 65,
+      "hash": "b9b900154b48a43361fdfdef33dda92a0bb8b8328f5a88fe4bfb8cd512d67152",
+      "sig_hash": "c76364dc2f9334b8592cea92d475cf7cc11f9b64130f6f4e2c9e9c9376c28204"
+    },
+    {
+      "file": "zig/vars02.zig",
+      "kind": "const",
+      "name": "vars02.c2b",
+      "start": 66,
+      "end": 87,
+      "hash": "10f6c08629398035e77dbcb356735f8c7d4e1964ecabde9af2f3d2d2f9fe9d9d",
+      "sig_hash": "605d5737b1a5a66643e4414d8e4e32edbab44baf173a59e2da7b4623b28f3d80"
+    },
+    {
+      "file": "zig/vars03.zig",
+      "kind": "var",
+      "name": "vars03.v3a",
+      "start": 0,
+      "end": 21,
+      "hash": "ddd0d73289731f88fdea067d71bc76b5c5e251f943996e7606ce38065dead46f",
+      "sig_hash": "ccd1215c5b2678274c57906a8bc3b443222270b6157d77a300f8317d064bd5b8"
+    },
+    {
+      "file": "zig/vars03.zig",
+      "kind": "var",
+      "name": "vars03.v3b",
+      "start": 22,
+      "end": 46,
+      "hash": "762beca27744c743f48094db20e97df9ef7bad53f12dbfb79e337c0e08055d08",
+      "sig_hash": "f03887fff9b7f84667e463f555013ce57594cb212b0316d938a718edec2fc548"
+    },
+    {
+      "file": "zig/vars03.zig",
+      "kind": "const",
+      "name": "vars03.c3a",
+      "start": 47,
+      "end": 65,
+      "hash": "f2d5ed9f6ada8a640f58afcbe095552d73d0f5a83f6d0bd4417fd0bdf0c19c3e",
+      "sig_hash": "9d643a8ea7513a985af5de761b15791598099e4b487c685ec28fab0a9eca96b7"
+    },
+    {
+      "file": "zig/vars03.zig",
+      "kind": "const",
+      "name": "vars03.c3b",
+      "start": 66,
+      "end": 87,
+      "hash": "c6bd36d795737d4ba0c3ffa471f28df0fdf2c5ae2f6ea0e37831f0106fc3bc6f",
+      "sig_hash": "1305d91e8d6d91b3bb5872c357474ac3ee974fd037ef022ef7bdb40db0a6ebe8"
+    },
+    {
+      "file": "zig/vars04.zig",
+      "kind": "var",
+      "name": "vars04.v4a",
+      "start": 0,
+      "end": 21,
+      "hash": "2da5f9e38ae5feaf4ed717de7577ce215dcb8600ee9b47d3aa3d5dcfc69fe821",
+      "sig_hash": "ccd1215c5b2678274c57906a8bc3b443222270b6157d77a300f8317d064bd5b8"
+    },
+    {
+      "file": "zig/vars04.zig",
+      "kind": "var",
+      "name": "vars04.v4b",
+      "start": 22,
+      "end": 46,
+      "hash": "762beca27744c743f48094db20e97df9ef7bad53f12dbfb79e337c0e08055d08",
+      "sig_hash": "f03887fff9b7f84667e463f555013ce57594cb212b0316d938a718edec2fc548"
+    },
+    {
+      "file": "zig/vars04.zig",
+      "kind": "const",
+      "name": "vars04.c4a",
+      "start": 47,
+      "end": 65,
+      "hash": "b0e7a1d21f49d1ec937ee5e0da80c060a3a41ecd1bdfa22a38d2d266a8503ca3",
+      "sig_hash": "ed0ab756ef0a88c00897eba2ba4af3db045e67ad95d6e31b1b4106e6818a4d22"
+    },
+    {
+      "file": "zig/vars04.zig",
+      "kind": "const",
+      "name": "vars04.c4b",
+      "start": 66,
+      "end": 87,
+      "hash": "87019be2892bafc59f1b89418e9db0492cec6d005e9e05d99116c3447fa78d10",
+      "sig_hash": "41404b5d64fcb283c160b341affa4fce46c69156ba893751842ac988d8dba49b"
+    }
+  ]
+}

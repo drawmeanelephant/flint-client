@@ -1,0 +1,1 @@
+test _ { const r = add ( 1 , 2 ) ; _ = r ; }

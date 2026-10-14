@@ -1,0 +1,40 @@
+{
+  "name": "move_vs_rename",
+  "base_atoms": [
+    {
+      "id": "0199de2d-dc00-7000-8000-000000000001",
+      "kind": "fn",
+      "name": "sample.X",
+      "hash": "1111111111111111111111111111111111111111111111111111111111111111",
+      "sig_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "span": { "file": "go/sample.go", "start": 10, "end": 50 }
+    }
+  ],
+  "into": [
+    [
+      {
+        "type": "move",
+        "atom_id": "0199de2d-dc00-7000-8000-000000000001",
+        "new_span": { "file": "go/other.go", "start": 10, "end": 50 },
+        "old_hash": "1111111111111111111111111111111111111111111111111111111111111111"
+      }
+    ]
+  ],
+  "from": [
+    [
+      {
+        "type": "rename",
+        "atom_id": "0199de2d-dc00-7000-8000-000000000001",
+        "new_name": "sample.XRenamed",
+        "old_hash": "1111111111111111111111111111111111111111111111111111111111111111"
+      }
+    ]
+  ],
+  "want": {
+    "clean": false,
+    "ops": [],
+    "conflicts": [
+      { "name": "sample.X", "type": "move_vs_rename" }
+    ]
+  }
+}

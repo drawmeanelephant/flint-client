@@ -1,0 +1,37 @@
+{
+  "name": "concurrent_add",
+  "base_atoms": [],
+  "into": [
+    [
+      {
+        "type": "add",
+        "atom_id": "0199de2d-dc00-7000-8000-000000000010",
+        "kind": "fn",
+        "new_name": "sample.NewFn",
+        "new_span": { "file": "go/sample.go", "start": 100, "end": 140 },
+        "new_hash": "6666666666666666666666666666666666666666666666666666666666666666",
+        "new_sig_hash": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+      }
+    ]
+  ],
+  "from": [
+    [
+      {
+        "type": "add",
+        "atom_id": "0199de2d-dc00-7000-8000-000000000020",
+        "kind": "fn",
+        "new_name": "sample.NewFn",
+        "new_span": { "file": "go/sample.go", "start": 120, "end": 160 },
+        "new_hash": "7777777777777777777777777777777777777777777777777777777777777777",
+        "new_sig_hash": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+      }
+    ]
+  ],
+  "want": {
+    "clean": false,
+    "ops": [],
+    "conflicts": [
+      { "name": "sample.NewFn", "type": "concurrent_add" }
+    ]
+  }
+}
