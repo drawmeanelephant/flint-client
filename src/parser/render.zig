@@ -33,16 +33,23 @@ pub fn render(allocator: std.mem.Allocator, atoms: []const Atom) ![]u8 {
     return out.toOwnedSlice(allocator);
 }
 
+fn dirEntryLess(_: void, a: fsys.DirEntry, b: fsys.DirEntry) bool {
+    return std.mem.lessThan(u8, a.name, b.name);
+}
+
 pub fn cmdParseCorpus(
     allocator: std.mem.Allocator,
     fs: fsys.FS,
     args: []const []const u8,
     out_w: *std.Io.Writer,
-) !void {
-    if (args.len == 0) {
-        return fsys.refuse("bad_args", "parse-corpus <dir>");
+) !u8 {
+    if (args.len != 1 or args[0].len == 0) {
+        return fsys.refuse("usage", "");
     }
-    const root = fsys.cleanMemPath(args[0]);
+    const root = std.mem.trimEnd(u8, args[0], "/");
+    if (root.len == 0) {
+        return fsys.refuse("usage", "");
+    }
 
     var all: std.ArrayList(Atom) = .empty;
     defer {
@@ -50,48 +57,111 @@ pub fn cmdParseCorpus(
         all.deinit(allocator);
     }
 
-    const subs = [_][]const u8{ "go", "zig" };
-    for (subs) |sub| {
-        const dir = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ root, sub });
-        defer allocator.free(dir);
-        const entries = fs.list(allocator, dir) catch continue;
-        defer fsys.FS.freeDirEntries(allocator, entries);
+    var files: usize = 0;
+    var parse_errors: usize = 0;
 
-        for (entries) |e| {
-            if (e.is_dir) continue;
-            const rel = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ sub, e.name });
-            defer allocator.free(rel);
-            if (parser.forPath(rel) == null) continue;
+    const go_dir = try std.fmt.allocPrint(allocator, "{s}/go", .{root});
+    defer allocator.free(go_dir);
+    const zig_dir = try std.fmt.allocPrint(allocator, "{s}/zig", .{root});
+    defer allocator.free(zig_dir);
 
-            const full = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ dir, e.name });
-            defer allocator.free(full);
-            const src = try fs.readFile(allocator, full, fsys.MaxFileReadBytes);
-            defer allocator.free(src);
+    const has_split_dirs = (fs.exists(allocator, go_dir) and fs.isDir(allocator, go_dir)) or
+        (fs.exists(allocator, zig_dir) and fs.isDir(allocator, zig_dir));
 
-            var perr: ?parser.ParseErrorInfo = null;
-            const atoms = parser.parseFile(allocator, rel, src, null, &perr) catch |err| {
-                if (err == error.ParseFailed) {
-                    if (perr) |pe| {
-                        return fsys.refuse(pe.code, pe.file);
-                    }
-                    return fsys.refuse("syntax", rel);
-                }
-                return err;
+    if (!fs.exists(allocator, root)) {
+        parse_errors += 1;
+    } else if (has_split_dirs) {
+        const subs = [_][]const u8{ "go", "zig" };
+        for (subs) |sub| {
+            const dir = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ root, sub });
+            defer allocator.free(dir);
+            if (!fs.exists(allocator, dir)) continue;
+            const entries = fs.list(allocator, dir) catch {
+                parse_errors += 1;
+                continue;
             };
-            defer allocator.free(atoms);
+            defer fsys.FS.freeDirEntries(allocator, entries);
+            std.mem.sort(fsys.DirEntry, entries, {}, dirEntryLess);
 
-            for (atoms) |a| {
-                try all.append(allocator, a);
+            for (entries) |e| {
+                if (e.is_dir) continue;
+                const rel = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ sub, e.name });
+                defer allocator.free(rel);
+                if (parser.forPath(rel) == null) continue;
+
+                files += 1;
+                const full = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ dir, e.name });
+                defer allocator.free(full);
+                const src = fs.readFile(allocator, full, fsys.MaxFileReadBytes) catch {
+                    parse_errors += 1;
+                    continue;
+                };
+                defer allocator.free(src);
+
+                var perr: ?parser.ParseErrorInfo = null;
+                const atoms = parser.parseFile(allocator, rel, src, null, &perr) catch {
+                    parse_errors += 1;
+                    continue;
+                };
+                defer allocator.free(atoms);
+
+                for (atoms) |a| {
+                    try all.append(allocator, a);
+                }
             }
+        }
+    } else {
+        if (fs.list(allocator, root)) |entries| {
+            defer fsys.FS.freeDirEntries(allocator, entries);
+            std.mem.sort(fsys.DirEntry, entries, {}, dirEntryLess);
+
+            for (entries) |e| {
+                if (e.is_dir) continue;
+                if (parser.forPath(e.name) == null) continue;
+
+                files += 1;
+                const full = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ root, e.name });
+                defer allocator.free(full);
+                const src = fs.readFile(allocator, full, fsys.MaxFileReadBytes) catch {
+                    parse_errors += 1;
+                    continue;
+                };
+                defer allocator.free(src);
+
+                var perr: ?parser.ParseErrorInfo = null;
+                const atoms = parser.parseFile(allocator, e.name, src, null, &perr) catch {
+                    parse_errors += 1;
+                    continue;
+                };
+                defer allocator.free(atoms);
+
+                for (atoms) |a| {
+                    try all.append(allocator, a);
+                }
+            }
+        } else |_| {
+            parse_errors += 1;
         }
     }
 
     const out = try render(allocator, all.items);
     defer allocator.free(out);
 
-    var it = std.mem.splitScalar(u8, out, '\n');
-    while (it.next()) |line| {
-        if (line.len == 0) continue;
-        try out_w.print("{s}\n", .{line});
+    const out_path = try std.fmt.allocPrint(allocator, "{s}.OUT", .{root});
+    defer allocator.free(out_path);
+
+    var write_failed = false;
+    fs.writeFileSafe(allocator, out_path, out) catch {
+        write_failed = true;
+    };
+
+    try out_w.print(
+        "flint: parse files={d} atoms={d} parse_errors={d}\n",
+        .{ files, all.items.len, parse_errors },
+    );
+
+    if (parse_errors != 0 or write_failed) {
+        return 1;
     }
+    return 0;
 }
