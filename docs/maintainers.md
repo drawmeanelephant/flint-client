@@ -17,6 +17,8 @@ Enable GitHub Actions failure notifications for the maintainers.
 The Linux job builds pinned kcov v43 from source rather than depending on an
 unavailable Ubuntu 24.04 `kcov` package. Its build dependencies come from apt;
 the resulting tool is installed only under the runner's temporary directory.
+The coverage binary uses Zig's LLVM backend for kcov-readable DWARF line
+tables; the ordinary Linux checks still exercise the default backend.
 
 The first Linux kcov run must establish the real source-line coverage
 baseline against the enforced 70% floor. The reporter fails on absent/empty

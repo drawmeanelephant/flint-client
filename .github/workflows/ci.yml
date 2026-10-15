@@ -100,7 +100,9 @@ jobs:
       - name: Compile and run instrumented tests
         run: |
           mkdir -p build
-          zig test src/main.zig --test-no-exec -femit-bin=build/flint-tests
+          # LLVM emits the DWARF line tables kcov can read. The normal Linux
+          # checks still exercise Zig's default backend.
+          zig test src/main.zig -fllvm --test-no-exec -femit-bin=build/flint-tests
           kcov --include-path="$PWD/src" build/coverage build/flint-tests
           python3 tools/check_coverage.py build/coverage --minimum 70
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
