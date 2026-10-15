@@ -1626,6 +1626,8 @@ test "parse error and duplicate decl all-or-nothing" {
     defer gpa.free(sample_zig);
     const bad_go = try hfs.readFile(gpa, "testdata/corpus/refuse/bad.go", store.MaxFileReadBytes);
     defer gpa.free(bad_go);
+    const anon_ret_zig = try hfs.readFile(gpa, "testdata/corpus/refuse/anon_ret.zig", store.MaxFileReadBytes);
+    defer gpa.free(anon_ret_zig);
 
     var h = try TestHarness.init(gpa);
     defer h.deinit();
@@ -1640,21 +1642,30 @@ test "parse error and duplicate decl all-or-nothing" {
         try std.testing.expectEqual(@as(u8, 0), res.rc);
     }
 
-    // 1 of 3 files has a syntax error -> must refuse and stage 0 ops.
+    // 1 of 3 files has a syntax error -> must refuse with :<offset> and stage 0 ops.
     {
         const res = try h.runCmd(&.{"add"});
         defer gpa.free(res.out);
         try std.testing.expectEqual(@as(u8, 1), res.rc);
-        try std.testing.expect(std.mem.indexOf(u8, res.out, "flint: refuse syntax") != null);
-        try std.testing.expect(std.mem.indexOf(u8, res.out, "go/b.go") != null);
+        try std.testing.expectEqualStrings("flint: refuse syntax go/b.go:29\n", res.out);
     }
     try std.testing.expect(!mfs.exists(gpa, "/host/FLINT/ws/w/STAGE.jsonl"));
     const atoms = try store.loadWorkspaceAtoms(gpa, mfs, h.root, "w");
     defer store.freeStoredAtoms(gpa, atoms);
     try std.testing.expectEqual(@as(usize, 0), atoms.len);
 
-    // Duplicate declaration in a file -> refuse duplicate_decl and stage 0 ops.
+    // parse_unsupported refusal also includes :<offset> suffix.
     try mfs.remove(gpa, "/host/src/go/b.go");
+    try mfs.writeFileSafe(gpa, "/host/src/zig/anon_ret.zig", anon_ret_zig);
+    {
+        const res = try h.runCmd(&.{"add"});
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 1), res.rc);
+        try std.testing.expectEqualStrings("flint: refuse parse_unsupported zig/anon_ret.zig:14\n", res.out);
+    }
+    try mfs.remove(gpa, "/host/src/zig/anon_ret.zig");
+
+    // Duplicate declaration in a file -> refuse duplicate_decl and stage 0 ops.
     try mfs.writeFileSafe(gpa, "/host/src/zig/dup.zig", "pub fn foo() void {}\npub fn foo() void {}\n");
     {
         const res = try h.runCmd(&.{"add"});
