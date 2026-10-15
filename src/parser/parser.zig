@@ -1,6 +1,7 @@
 const std = @import("std");
 const store = @import("../store.zig");
 const zig_parser = @import("zig.zig");
+const go_parser = @import("golang.zig");
 
 pub const Atom = struct {
     kind: []const u8,
@@ -62,10 +63,7 @@ pub fn parseFile(
     };
     return switch (lang) {
         .zig => zig_parser.parse(allocator, file, src, sink, err_info),
-        .go => {
-            err_info.* = .{ .file = file, .offset = 0, .code = "parse_unsupported" };
-            return error.ParseFailed;
-        },
+        .go => go_parser.parse(allocator, file, src, sink, err_info),
     };
 }
 
