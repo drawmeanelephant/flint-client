@@ -14,6 +14,7 @@ pub const workspace = @import("workspace.zig");
 pub const sign = @import("sign.zig");
 pub const merge = @import("merge.zig");
 pub const sync = @import("sync.zig");
+pub const release = @import("release.zig");
 
 /// Runtime context for executing a `flint` command.
 /// Allows injecting an in-memory filesystem, custom writers, clock/RNG, and environment in tests.
@@ -105,6 +106,7 @@ fn printHelp(w: *Io.Writer) void {
         \\  clone <remote> --stream=<s> --name=<n> --src=<dir> [--auth-key=<file>]
         \\  push [--remote=<url>] [--stream=<s>] [--ws=<n>] [--auth-key=<file>]
         \\  pull [--remote=<url>] [--stream=<s>] [--ws=<n>] [--auth-key=<file>] [--reset]
+        \\  release --elf=<f> --name=<n> --version=<v> [--manifest-row=<r>] [--ws=<n>] [--key=<k>] [-m <msg>] [--dry-run]
         \\  parse-corpus <dir>
         \\  keygen [--name=<n>]
         \\
@@ -233,6 +235,24 @@ pub fn runWithContext(ctx: Context, args: []const []const u8) u8 {
         return render.cmdParseCorpus(ctx.allocator, ctx.fs, sub, ctx.stdout) catch |err| {
             return handleErr(err, ctx.stdout);
         };
+    }
+
+    // `release` resolves the store itself so `--dry-run` works anywhere.
+    if (std.mem.eql(u8, verb, "release")) {
+        release.cmdRelease(
+            ctx.allocator,
+            ctx.fs,
+            extracted.store_flag,
+            ctx.env_flint_store,
+            ctx.env_flint_sign_key,
+            ctx.cwd,
+            uuid_gen,
+            ctx.stdout,
+            sub,
+        ) catch |err| {
+            return handleErr(err, ctx.stdout);
+        };
+        return 0;
     }
 
     const is_known_store_verb = std.mem.eql(u8, verb, "keygen") or
@@ -402,6 +422,7 @@ test {
     _ = sign;
     _ = merge;
     _ = sync;
+    _ = release;
 }
 
 const TestHarness = struct {
