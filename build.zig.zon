@@ -1,0 +1,15 @@
+.{
+    .name = .flint_client,
+    .version = "0.1.0",
+    .fingerprint = 0xd426dd36f8816bc8,
+    .minimum_zig_version = "0.17.0",
+    .dependencies = .{},
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "testdata",
+        "LICENSE",
+        "README.md",
+    },
+}
