@@ -13,6 +13,7 @@ pub const render = @import("parser/render.zig");
 pub const workspace = @import("workspace.zig");
 pub const sign = @import("sign.zig");
 pub const merge = @import("merge.zig");
+pub const sync = @import("sync.zig");
 
 /// Runtime context for executing a `flint` command.
 /// Allows injecting an in-memory filesystem, custom writers, clock/RNG, and environment in tests.
@@ -27,6 +28,9 @@ pub const Context = struct {
     env_flint_store: ?[]const u8 = null,
     env_flint_sign_key: ?[]const u8 = null,
     env_flint_remote: ?[]const u8 = null,
+    env_flint_auth_key: ?[]const u8 = null,
+    sync_dial: ?sync.DialFn = null,
+    sync_dial_ctx: ?*anyopaque = null,
 };
 
 pub fn main(init: std.process.Init) u8 {
@@ -57,6 +61,7 @@ pub fn main(init: std.process.Init) u8 {
         .env_flint_store = init.environ_map.get("FLINT_STORE"),
         .env_flint_sign_key = init.environ_map.get("FLINT_SIGN_KEY"),
         .env_flint_remote = init.environ_map.get("FLINT_REMOTE"),
+        .env_flint_auth_key = init.environ_map.get("FLINT_AUTH_KEY"),
     };
 
     const rc = runWithContext(ctx, argv);
@@ -82,6 +87,9 @@ fn printHelp(w: *Io.Writer) void {
         \\  verify <id> | --all | --file=<log>
         \\  fork <from> <to>
         \\  merge <from> [--ws=<n>]
+        \\  clone <remote> --stream=<s> --name=<n> --src=<dir> [--auth-key=<file>]
+        \\  push [--remote=<url>] [--stream=<s>] [--ws=<n>] [--auth-key=<file>]
+        \\  pull [--remote=<url>] [--stream=<s>] [--ws=<n>] [--auth-key=<file>]
         \\  parse-corpus <dir>
         \\  keygen [--name=<n>]
         \\
@@ -263,6 +271,62 @@ pub fn runWithContext(ctx: Context, args: []const []const u8) u8 {
         };
     }
 
+    const dial_fn = ctx.sync_dial orelse sync.defaultTcpDial;
+
+    if (std.mem.eql(u8, verb, "clone")) {
+        sync.cmdClone(
+            ctx.allocator,
+            ctx.io,
+            ctx.fs,
+            root,
+            ctx.env_flint_remote,
+            ctx.env_flint_auth_key,
+            dial_fn,
+            ctx.sync_dial_ctx,
+            ctx.stdout,
+            sub,
+        ) catch |err| {
+            return handleErr(err, ctx.stdout);
+        };
+        return 0;
+    }
+
+    if (std.mem.eql(u8, verb, "push")) {
+        sync.cmdPush(
+            ctx.allocator,
+            ctx.io,
+            ctx.fs,
+            root,
+            ctx.env_flint_remote,
+            ctx.env_flint_auth_key,
+            dial_fn,
+            ctx.sync_dial_ctx,
+            ctx.stdout,
+            sub,
+        ) catch |err| {
+            return handleErr(err, ctx.stdout);
+        };
+        return 0;
+    }
+
+    if (std.mem.eql(u8, verb, "pull")) {
+        sync.cmdPull(
+            ctx.allocator,
+            ctx.io,
+            ctx.fs,
+            root,
+            ctx.env_flint_remote,
+            ctx.env_flint_auth_key,
+            dial_fn,
+            ctx.sync_dial_ctx,
+            ctx.stdout,
+            sub,
+        ) catch |err| {
+            return handleErr(err, ctx.stdout);
+        };
+        return 0;
+    }
+
     if (std.mem.eql(u8, verb, "keygen")) {
         ed25519.cmdKeygen(ctx.allocator, ctx.fs, root, uuid_gen, sub, ctx.stdout) catch |err| {
             return handleErr(err, ctx.stdout);
@@ -291,6 +355,7 @@ test {
     _ = workspace;
     _ = sign;
     _ = merge;
+    _ = sync;
 }
 
 const TestHarness = struct {
@@ -302,6 +367,10 @@ const TestHarness = struct {
     root: []const u8 = "/host/FLINT",
     cwd: []const u8 = "/host",
     env_sign_key: ?[]const u8 = null,
+    env_remote: ?[]const u8 = null,
+    env_auth_key: ?[]const u8 = null,
+    sync_dial: ?sync.DialFn = null,
+    sync_dial_ctx: ?*anyopaque = null,
 
     fn init(allocator: Allocator) !*TestHarness {
         const h = try allocator.create(TestHarness);
@@ -348,6 +417,10 @@ const TestHarness = struct {
             .uuid_gen = &self.uuid_gen,
             .env_flint_store = self.root,
             .env_flint_sign_key = self.env_sign_key,
+            .env_flint_remote = self.env_remote,
+            .env_flint_auth_key = self.env_auth_key,
+            .sync_dial = self.sync_dial,
+            .sync_dial_ctx = self.sync_dial_ctx,
         };
         const rc = runWithContext(ctx, args);
         return .{
@@ -2553,6 +2626,387 @@ test "conflicting merge writes MERGE.json and leaves history and ATOMS.jsonl byt
     try std.testing.expectEqualStrings("calc.X", conflicts[0].object.get("name").?.string);
     try std.testing.expectEqualStrings("concurrent_modify", conflicts[0].object.get("type").?.string);
 }
+
+test "M106e remote verbs: push, clone, pull, fork_needed, tampered sig_invalid, and REMOTE.json" {
+    const gpa = std.testing.allocator;
+
+    // Server store in its own MemFS.
+    var srv_mem = try fsys.MemFS.init(gpa);
+    defer srv_mem.deinit();
+    const srv_fs = srv_mem.fs();
+    try srv_fs.mkdir(gpa, "/srv/FLINT/streams");
+
+    var server = sync.InProcServer{
+        .allocator = gpa,
+        .fs = srv_fs,
+        .store_root = "/srv/FLINT",
+    };
+
+    // Client A store.
+    var ha = try TestHarness.init(gpa);
+    defer ha.deinit();
+    ha.env_sign_key = rfc8032_seed_hex;
+    ha.sync_dial = sync.InProcServer.dial;
+    ha.sync_dial_ctx = &server;
+    const fsa = ha.mem.fs();
+
+    const base_src = "package calc\n\nfunc X() int {\n\treturn 1\n}\n\nfunc Y() int {\n\treturn 2\n}\n";
+    try fsa.writeFileSafe(gpa, "/host/SRCA/calc.go", base_src);
+
+    for ([_][]const []const u8{
+        &.{ "init", "--name=a", "--src=/host/SRCA" },
+        &.{ "add", "/host/SRCA" },
+        &.{ "commit", "-m", "initial" },
+    }) |cmd| {
+        const res = try ha.runCmd(cmd);
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+    }
+
+    // 1. Push without any remote configured refuses `remote_missing`.
+    {
+        const res = try ha.runCmd(&.{"push"});
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 1), res.rc);
+        try std.testing.expectEqualStrings("flint: refuse remote_missing\n", res.out);
+    }
+
+    // 2. Push with `--remote=tcp://127.0.0.1:4748` creates `main` on server, appends Change,
+    //    and persists `ws/a/REMOTE.json`.
+    {
+        const res = try ha.runCmd(&.{ "push", "--remote=tcp://127.0.0.1:4748" });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+        try std.testing.expectEqualStrings("flint: push ok stream=main changes=1\n", res.out);
+    }
+
+    // Verify `ws/a/REMOTE.json` was written and subsequent `push` with no `--remote` flag
+    // resolves from `REMOTE.json` and reports `up to date`.
+    {
+        const rc_opt = try store.loadWorkspaceRemote(gpa, fsa, ha.root, "a");
+        try std.testing.expect(rc_opt != null);
+        defer rc_opt.?.deinit(gpa);
+        try std.testing.expectEqualStrings("tcp://127.0.0.1:4748", rc_opt.?.remote);
+
+        const res = try ha.runCmd(&.{"push"});
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+        try std.testing.expectEqualStrings("flint: push up to date\n", res.out);
+    }
+
+    // Verify server log and stream record are byte-identical to Client A's.
+    var idx_a = try store.loadStoreIndex(gpa, fsa, ha.root);
+    defer idx_a.deinit();
+    const main_id = idx_a.streamByName("main").?.id;
+    {
+        const a_log_p = try store.streamLogPath(gpa, ha.root, main_id);
+        defer gpa.free(a_log_p);
+        const s_log_p = try store.streamLogPath(gpa, server.store_root, main_id);
+        defer gpa.free(s_log_p);
+
+        const a_log = try fsa.readFile(gpa, a_log_p, store.MaxFileReadBytes);
+        defer gpa.free(a_log);
+        const s_log = try srv_fs.readFile(gpa, s_log_p, store.MaxFileReadBytes);
+        defer gpa.free(s_log);
+        try std.testing.expectEqualStrings(a_log, s_log);
+    }
+
+    // 3. Client B clones `main` from the server, replays atoms byte-verbatim, and passes `verify --all`.
+    var hb = try TestHarness.init(gpa);
+    defer hb.deinit();
+    hb.env_sign_key = rfc8032_seed_hex;
+    hb.sync_dial = sync.InProcServer.dial;
+    hb.sync_dial_ctx = &server;
+    const fsb = hb.mem.fs();
+    try fsb.writeFileSafe(gpa, "/host/SRCB/calc.go", base_src);
+
+    {
+        const res = try hb.runCmd(&.{
+            "clone",
+            "tcp://127.0.0.1:4748",
+            "--stream=main",
+            "--name=b",
+            "--src=/host/SRCB",
+        });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+        try std.testing.expectEqualStrings("flint: clone ok stream=main changes=1\n", res.out);
+    }
+    {
+        const vres = try hb.runCmd(&.{ "verify", "--all" });
+        defer gpa.free(vres.out);
+        try std.testing.expectEqual(@as(u8, 0), vres.rc);
+        try std.testing.expect(std.mem.indexOf(u8, vres.out, "sig: verified\n") != null);
+
+        // Compare Client B's stream log and ATOMS.jsonl byte-for-byte with Client A's.
+        const a_log_p = try store.streamLogPath(gpa, ha.root, main_id);
+        defer gpa.free(a_log_p);
+        const b_log_p = try store.streamLogPath(gpa, hb.root, main_id);
+        defer gpa.free(b_log_p);
+        const a_log = try fsa.readFile(gpa, a_log_p, store.MaxFileReadBytes);
+        defer gpa.free(a_log);
+        const b_log = try fsb.readFile(gpa, b_log_p, store.MaxFileReadBytes);
+        defer gpa.free(b_log);
+        try std.testing.expectEqualStrings(a_log, b_log);
+
+        const a_atoms_p = try store.workspaceAtomsPath(gpa, ha.root, "a");
+        defer gpa.free(a_atoms_p);
+        const b_atoms_p = try store.workspaceAtomsPath(gpa, hb.root, "b");
+        defer gpa.free(b_atoms_p);
+        const a_atoms = try fsa.readFile(gpa, a_atoms_p, store.MaxFileReadBytes);
+        defer gpa.free(a_atoms);
+        const b_atoms = try fsb.readFile(gpa, b_atoms_p, store.MaxFileReadBytes);
+        defer gpa.free(b_atoms);
+        try std.testing.expectEqualStrings(a_atoms, b_atoms);
+    }
+
+    // 4. Client A makes a second commit and pushes it to the server.
+    try fsa.writeFileSafe(
+        gpa,
+        "/host/SRCA/calc.go",
+        "package calc\n\nfunc X() int {\n\treturn 10\n}\n\nfunc Y() int {\n\treturn 2\n}\n",
+    );
+    ha.now += 5;
+    for ([_][]const []const u8{
+        &.{ "add", "/host/SRCA" },
+        &.{ "commit", "-m", "second" },
+        &.{"push"},
+    }) |cmd| {
+        const res = try ha.runCmd(cmd);
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+    }
+
+    // 5. Tampered pull line on Client B aborts with `sig_invalid` and writes nothing!
+    {
+        const b_log_p = try store.streamLogPath(gpa, hb.root, main_id);
+        defer gpa.free(b_log_p);
+        const b_rec_p = try store.streamRecordPath(gpa, hb.root, main_id);
+        defer gpa.free(b_rec_p);
+        const log_before = try fsb.readFile(gpa, b_log_p, store.MaxFileReadBytes);
+        defer gpa.free(log_before);
+        const rec_before = try fsb.readFile(gpa, b_rec_p, store.MaxFileReadBytes);
+        defer gpa.free(rec_before);
+
+        server.tamper_read_sig = true;
+        defer server.tamper_read_sig = false;
+
+        const res = try hb.runCmd(&.{"pull"});
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 1), res.rc);
+        try std.testing.expectEqualStrings("flint: refuse sig_invalid\n", res.out);
+
+        const log_after = try fsb.readFile(gpa, b_log_p, store.MaxFileReadBytes);
+        defer gpa.free(log_after);
+        const rec_after = try fsb.readFile(gpa, b_rec_p, store.MaxFileReadBytes);
+        defer gpa.free(rec_after);
+        try std.testing.expectEqualStrings(log_before, log_after);
+        try std.testing.expectEqualStrings(rec_before, rec_after);
+    }
+
+    // 6. Clean `pull` on Client B advances head and appends the second Change byte-verbatim.
+    {
+        const res = try hb.runCmd(&.{"pull"});
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+        try std.testing.expectEqualStrings("flint: pull ok stream=main changes=1\n", res.out);
+
+        const res2 = try hb.runCmd(&.{"pull"});
+        defer gpa.free(res2.out);
+        try std.testing.expectEqual(@as(u8, 0), res2.rc);
+        try std.testing.expectEqualStrings("flint: pull up to date\n", res2.out);
+
+        const vres = try hb.runCmd(&.{ "verify", "--all" });
+        defer gpa.free(vres.out);
+        try std.testing.expectEqual(@as(u8, 0), vres.rc);
+    }
+
+    // 7. Divergence test: Client A commits+pushes Change 3; Client B (before pulling Change 3)
+    //    syncs its local ATOMS, commits a divergent Change 3b locally, and tries `push` (`stale_head`)
+    //    then `pull` (`fork_needed`).
+    try fsa.writeFileSafe(
+        gpa,
+        "/host/SRCA/calc.go",
+        "package calc\n\nfunc X() int {\n\treturn 10\n}\n\nfunc Y() int {\n\treturn 20\n}\n",
+    );
+    ha.now += 5;
+    for ([_][]const []const u8{
+        &.{ "add", "/host/SRCA" },
+        &.{ "commit", "-m", "server-ahead" },
+        &.{"push"},
+    }) |cmd| {
+        const res = try ha.runCmd(cmd);
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+    }
+
+    // Client B edits calc.go and commits locally on `main` (diverging from server's `main`).
+    try fsb.writeFileSafe(
+        gpa,
+        "/host/SRCB/calc.go",
+        "package calc\n\nfunc X() int {\n\treturn 1\n}\n\nfunc Y() int {\n\treturn 999\n}\n",
+    );
+    hb.now += 10;
+    for ([_][]const []const u8{
+        &.{ "add", "/host/SRCB" },
+        &.{ "commit", "-m", "diverged-local" },
+    }) |cmd| {
+        const res = try hb.runCmd(cmd);
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+    }
+
+    // Client B `push` refuses `stale_head`.
+    {
+        const res = try hb.runCmd(&.{"push"});
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 1), res.rc);
+        try std.testing.expectEqualStrings("flint: refuse stale_head\n", res.out);
+    }
+
+    // Client B `pull` refuses `fork_needed` because local and remote heads have diverged.
+    {
+        const res = try hb.runCmd(&.{"pull"});
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 1), res.rc);
+        try std.testing.expectEqualStrings("flint: refuse fork_needed\n", res.out);
+    }
+}
+
+test "M106e auth challenge, allow-author, forked stream clone/push, and loopback TCP" {
+    const gpa = std.testing.allocator;
+
+    var srv_mem = try fsys.MemFS.init(gpa);
+    defer srv_mem.deinit();
+    const srv_fs = srv_mem.fs();
+    try srv_fs.mkdir(gpa, "/srv/FLINT/streams");
+
+    const auth_secret_hex = "a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5";
+    var auth_key_bytes: [32]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&auth_key_bytes, auth_secret_hex);
+
+    var server = sync.InProcServer{
+        .allocator = gpa,
+        .fs = srv_fs,
+        .store_root = "/srv/FLINT",
+        .auth_key = auth_key_bytes,
+    };
+
+    var ha = try TestHarness.init(gpa);
+    defer ha.deinit();
+    ha.env_sign_key = rfc8032_seed_hex;
+    ha.sync_dial = sync.InProcServer.dial;
+    ha.sync_dial_ctx = &server;
+    const fsa = ha.mem.fs();
+
+    try fsa.writeFileSafe(gpa, "/host/auth.key", auth_secret_hex ++ "\n");
+    try fsa.writeFileSafe(gpa, "/host/wrong.key", "0000000000000000000000000000000000000000000000000000000000000000\n");
+    try fsa.writeFileSafe(gpa, "/host/SRCA/calc.go", "package calc\n\nfunc X() int {\n\treturn 1\n}\n");
+
+    for ([_][]const []const u8{
+        &.{ "init", "--name=a", "--src=/host/SRCA" },
+        &.{ "add", "/host/SRCA" },
+        &.{ "commit", "-m", "c1" },
+        &.{ "fork", "main", "feature" },
+        &.{ "init", "--name=feat", "--src=/host/SRCA", "--stream=feature" },
+    }) |cmd| {
+        const res = try ha.runCmd(cmd);
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+    }
+
+    try fsa.writeFileSafe(gpa, "/host/SRCA/calc.go", "package calc\n\nfunc X() int {\n\treturn 2\n}\n");
+    ha.now += 5;
+    for ([_][]const []const u8{
+        &.{ "add", "--ws=feat", "/host/SRCA" },
+        &.{ "commit", "--ws=feat", "-m", "c2-on-feature" },
+    }) |cmd| {
+        const res = try ha.runCmd(cmd);
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+    }
+
+    // 1. Unauthenticated push to `--auth-key` server refuses `auth_required`.
+    {
+        const res = try ha.runCmd(&.{ "push", "--ws=feat", "--remote=tcp://127.0.0.1:4748" });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 1), res.rc);
+        try std.testing.expectEqualStrings("flint: refuse auth_required\n", res.out);
+    }
+
+    // 2. Wrong `--auth-key` refuses `auth_failed`.
+    {
+        const res = try ha.runCmd(&.{ "push", "--ws=feat", "--remote=tcp://127.0.0.1:4748", "--auth-key=/host/wrong.key" });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 1), res.rc);
+        try std.testing.expectEqualStrings("flint: refuse auth_failed\n", res.out);
+    }
+
+    // 3. Author allowlist gate: unlisted author refuses `author_not_allowed`.
+    const other_author = [_][]const u8{"0000000000000000000000000000000000000000000000000000000000000000"};
+    server.allow_authors = &other_author;
+    {
+        const res = try ha.runCmd(&.{ "push", "--ws=feat", "--remote=tcp://127.0.0.1:4748", "--auth-key=/host/auth.key" });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 1), res.rc);
+        try std.testing.expectEqualStrings("flint: refuse author_not_allowed\n", res.out);
+    }
+    const allowed_author = [_][]const u8{rfc8032_pub_hex};
+    server.allow_authors = &allowed_author;
+
+    // 4. Correct `--auth-key` + listed author succeeds and pushes both `main` (ancestor) and `feature`!
+    {
+        const res = try ha.runCmd(&.{ "push", "--ws=feat", "--remote=tcp://127.0.0.1:4748", "--auth-key=/host/auth.key" });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+        try std.testing.expectEqualStrings("flint: push ok stream=feature changes=1\n", res.out);
+    }
+
+    // 5. Real loopback TCP test (`defaultTcpDial` over `127.0.0.1:<ephemeral_port>`):
+    //    Client C clones `feature` (following `forked_from` chain `main` -> `feature`) over a live TCP socket!
+    var listen_addr = Io.net.IpAddress{ .ip4 = Io.net.Ip4Address.loopback(0) };
+    var tcp_srv = try listen_addr.listen(std.testing.io, .{ .reuse_address = true });
+    defer tcp_srv.deinit(std.testing.io);
+    const port = tcp_srv.socket.address.getPort();
+    const tcp_url = try std.fmt.allocPrint(gpa, "tcp://127.0.0.1:{d}", .{port});
+    defer gpa.free(tcp_url);
+
+    const ServerAcceptTask = struct {
+        fn run(srv: *sync.InProcServer, tcp_listener: *Io.net.Server, io: Io) void {
+            const conn = tcp_listener.accept(io) catch return;
+            srv.serveNetStream( std.heap.page_allocator, io, conn);
+        }
+    };
+    const thr = try std.Thread.spawn(.{}, ServerAcceptTask.run, .{ &server, &tcp_srv, std.testing.io });
+    defer thr.join();
+
+    var hc = try TestHarness.init(gpa);
+    defer hc.deinit();
+    hc.env_auth_key = auth_secret_hex;
+    // Leave `hc.sync_dial = null` so `runWithContext` uses `sync.defaultTcpDial` over real TCP!
+    const fsc = hc.mem.fs();
+    try fsc.mkdir(gpa, "/host/SRCC");
+
+    {
+        const res = try hc.runCmd(&.{
+            "clone",
+            tcp_url,
+            "--stream=feature",
+            "--name=c",
+            "--src=/host/SRCC",
+        });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+        try std.testing.expectEqualStrings("flint: clone ok stream=feature changes=2\n", res.out);
+    }
+
+    {
+        const vres = try hc.runCmd(&.{ "verify", "--all" });
+        defer gpa.free(vres.out);
+        try std.testing.expectEqual(@as(u8, 0), vres.rc);
+    }
+}
+
 
 
 

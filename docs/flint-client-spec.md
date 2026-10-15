@@ -51,6 +51,18 @@ match the Go implementation exactly — the lines below are observed from
 | `merge <from> [--ws=<n>]` | Net-effect 3-way merge on Ops. `flint: merge up to date`; on success `flint: merge ok conflicts=0 ops=<n> id=<id>` followed by `flint: merge src not materialized files=<n>`; conflicts print one `flint: merge conflict atom=<name> type=<t>` per conflict plus `flint: merge conflicts=<n>` (exit 2). Refuses `stage_dirty` when the workspace stage is non-empty. |
 | `parse-corpus <dir>` | Dev/conformance verb: parse every `.go`/`.zig` file, write `<dir>.OUT` = `parser.Render(atoms)` via the crash-safe write (**contractual — the corpus gate compares it byte-for-byte**), print `flint: parse files=<n> atoms=<m> parse_errors=<e>`. Keep — it is how the corpus gate runs. |
 | `keygen [--name=<n>]` | **New, host-only.** Generate a 32-byte seed, store it, print the derived public key hex. See §2.3. |
+| `clone <remote> --stream=<name\|id> [--name=<ws>] --src=<dir> [--auth-key=<file>]` | **M106e remote verb.** Initialize store, follow `forked_from` chains (`open` + `read`), re-verify every Change (`sig_invalid` aborts before writing), replay atoms into `ws/<name>/ATOMS.jsonl`, write `WORKSPACE.json` and `REMOTE.json`. Prints `flint: clone ok stream=<name> changes=<n>`. |
+| `push [--remote=<url>] [--stream=<s>] [--ws=<n>] [--auth-key=<file>]` | **M106e remote verb.** `create` any streams in the `forked_from` ancestry missing on the server, then `append` the client's unsent suffix. Prints `flint: push ok stream=<s> changes=<n>` or `flint: push up to date`. |
+| `pull [--remote=<url>] [--stream=<s>] [--ws=<n>] [--auth-key=<file>]` | **M106e remote verb.** `open`/`read after=<head>`, re-verify every pulled Change (`sig_invalid` aborts and writes nothing), append raw lines, roll local stream record forward. Prints `flint: pull ok stream=<s> changes=<n>` or `flint: pull up to date`. Refuses `fork_needed` when remote head diverges from local head. |
+
+Remote resolution for `push`/`pull`/`clone`: `--remote <url>` flag →
+`FLINT_REMOTE` env var → `ws/<name>/REMOTE.json` (`{"remote":"tcp://<host>:<port>","stream":"<id>"}`) →
+refuse `remote_missing`. Optional shared-secret authentication (`--auth-key=<file>` or
+`FLINT_AUTH_KEY`) answers `flintd`'s 16-byte `nonce` challenge with
+`HMAC-SHA256(key, "FLINT-SYNC-AUTH/1\x00" || nonce_bytes)`. Wire refusals from
+`FLINT-SYNC/1` (`proto_version`, `auth_required`, `auth_failed`, `author_not_allowed`,
+`change_too_large`, `stale_head`, `stream_exists`, `stream_missing`, `change_missing`,
+`change_malformed`, `sig_invalid`, etc.) print directly as `flint: refuse <name>`.
 
 Workspace selection for `add`/`status`/`commit`/`log`/`merge` follows the
 Go `resolveWorkspace`: `--ws=` names it (`ws_missing`); otherwise the sole
