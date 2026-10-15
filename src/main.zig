@@ -33,6 +33,21 @@ pub const Context = struct {
     sync_dial_ctx: ?*anyopaque = null,
 };
 
+/// Returns the shell's logical cwd ($PWD) when it resolves to the same
+/// directory as getcwd, else the physical path. Messages that name the cwd
+/// (`store_not_found`) then show the path the user typed rather than a
+/// canonicalized one (`/private/var/...` on macOS).
+fn logicalCwd(io: Io, arena: Allocator, pwd: ?[]const u8) []const u8 {
+    const phys = std.process.currentPathAlloc(io, arena) catch return ".";
+    const p = pwd orelse return phys;
+    if (p.len == 0 or p[0] != '/') return phys;
+    const clean_p = fsys.cleanPath(arena, p) catch return phys;
+    const phys_st = Io.Dir.statFile(.cwd(), io, phys, .{}) catch return phys;
+    const pwd_st = Io.Dir.statFile(.cwd(), io, clean_p, .{}) catch return phys;
+    if (pwd_st.kind != .directory or pwd_st.inode != phys_st.inode) return phys;
+    return clean_p;
+}
+
 pub fn main(init: std.process.Init) u8 {
     const arena = init.arena.allocator();
     const args = init.minimal.args.toSlice(arena) catch return 1;
@@ -48,7 +63,7 @@ pub fn main(init: std.process.Init) u8 {
 
     var host_fs = fsys.HostFS.init(init.io);
     var host_uuid = uuid.UUIDGen.initHost(init.io);
-    const cwd = std.process.currentPathAlloc(init.io, arena) catch ".";
+    const cwd = logicalCwd(init.io, arena, init.environ_map.get("PWD"));
 
     const ctx = Context{
         .allocator = init.gpa,
@@ -100,6 +115,32 @@ fn printHelp(w: *Io.Writer) void {
     ) catch {};
 }
 
+/// Maps common host/transport error names to lowercase phrases so `flint:
+/// error` lines read like the Go implementation's console messages instead
+/// of leaking raw Zig error names. Unmapped names print verbatim.
+fn friendlyErrorName(err: anyerror) []const u8 {
+    return switch (err) {
+        error.ConnectionRefused => "connection refused",
+        error.ConnectionResetByPeer => "connection reset by peer",
+        error.ConnectionTimedOut => "connection timed out",
+        error.UnknownHostName => "unknown host",
+        error.NameServerFailure => "name resolution failed",
+        error.HostUnreachable => "host unreachable",
+        error.NetworkUnreachable => "network unreachable",
+        error.NetworkDown => "network down",
+        error.EndOfStream => "connection closed",
+        error.BrokenPipe => "broken pipe",
+        error.AddressNotAvailable => "address not available",
+        error.AddressInUse => "address already in use",
+        error.AccessDenied => "access denied",
+        error.FileNotFound => "file not found",
+        error.NotDir => "not a directory",
+        error.IsDir => "is a directory",
+        error.OutOfMemory => "out of memory",
+        else => @errorName(err),
+    };
+}
+
 pub fn handleErr(err: anyerror, out: *Io.Writer) u8 {
     if (err == error.Refuse) {
         fsys.writeRefuseLine(out);
@@ -108,7 +149,11 @@ pub fn handleErr(err: anyerror, out: *Io.Writer) u8 {
         }
         return 1;
     }
-    out.print("flint: error {s}\n", .{@errorName(err)}) catch {};
+    if (fsys.err_context) |*ec| {
+        out.print("flint: error {s} {s}: {s}\n", .{ ec.verb(), ec.remote(), friendlyErrorName(err) }) catch {};
+    } else {
+        out.print("flint: error {s}\n", .{friendlyErrorName(err)}) catch {};
+    }
     return 1;
 }
 
@@ -154,6 +199,7 @@ fn extractGlobalArgs(
 }
 
 pub fn runWithContext(ctx: Context, args: []const []const u8) u8 {
+    fsys.clearErrContext();
     var default_uuid = uuid.UUIDGen.initHost(ctx.io);
     const uuid_gen = ctx.uuid_gen orelse &default_uuid;
 
@@ -3173,6 +3219,64 @@ test "M106e auth challenge, allow-author, forked stream clone/push, and loopback
         const vres = try hc.runCmd(&.{ "verify", "--all" });
         defer gpa.free(vres.out);
         try std.testing.expectEqual(@as(u8, 0), vres.rc);
+    }
+}
+
+const FailDial = struct {
+    err: anyerror,
+
+    fn dial(ctx: ?*anyopaque, _: Allocator, _: Io, _: []const u8) anyerror!sync.Transport {
+        const self: *FailDial = @ptrCast(@alignCast(ctx.?));
+        return self.err;
+    }
+};
+
+test "transport errors print verb + remote context, not raw error names (#31)" {
+    const gpa = std.testing.allocator;
+
+    var h = try TestHarness.init(gpa);
+    defer h.deinit();
+    const fs = h.mem.fs();
+    try fs.mkdir(gpa, "/host/SRCA");
+    try fs.mkdir(gpa, "/host/SRCB");
+    {
+        const res = try h.runCmd(&.{ "init", "--name=a", "--src=/host/SRCA" });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+    }
+
+    var fd = FailDial{ .err = error.ConnectionRefused };
+    h.sync_dial = FailDial.dial;
+    h.sync_dial_ctx = &fd;
+
+    {
+        const res = try h.runCmd(&.{ "pull", "--remote=tcp://127.0.0.1:1", "--ws=a" });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 1), res.rc);
+        try std.testing.expectEqualStrings("flint: error pull tcp://127.0.0.1:1: connection refused\n", res.out);
+    }
+    fd.err = error.UnknownHostName;
+    {
+        const res = try h.runCmd(&.{ "push", "--remote=tcp://nohost.invalid:9", "--ws=a" });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 1), res.rc);
+        try std.testing.expectEqualStrings("flint: error push tcp://nohost.invalid:9: unknown host\n", res.out);
+    }
+    fd.err = error.ConnectionRefused;
+    {
+        const res = try h.runCmd(&.{ "clone", "tcp://127.0.0.1:1", "--stream=main", "--name=b", "--src=/host/SRCB" });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 1), res.rc);
+        try std.testing.expectEqualStrings("flint: error clone tcp://127.0.0.1:1: connection refused\n", res.out);
+    }
+
+    // The context must not leak into the next command: `push` with no remote
+    // configured still refuses `remote_missing` in the plain refusal form.
+    {
+        const res = try h.runCmd(&.{"push"});
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 1), res.rc);
+        try std.testing.expectEqualStrings("flint: refuse remote_missing\n", res.out);
     }
 }
 
