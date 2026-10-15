@@ -801,3 +801,630 @@ pub fn loadAllStreamChanges(allocator: Allocator, fs: FS, root: []const u8, idx:
 
     return all.toOwnedSlice(allocator);
 }
+
+pub const AtomKey = struct {
+    file: []const u8,
+    kind: []const u8,
+    name: []const u8,
+};
+
+pub const AtomKeyContext = struct {
+    pub fn hash(_: AtomKeyContext, k: AtomKey) u64 {
+        var h = std.hash.Wyhash.init(0);
+        h.update(k.file);
+        h.update("\x00");
+        h.update(k.kind);
+        h.update("\x00");
+        h.update(k.name);
+        return h.final();
+    }
+
+    pub fn eql(_: AtomKeyContext, a: AtomKey, b: AtomKey) bool {
+        return std.mem.eql(u8, a.file, b.file) and
+            std.mem.eql(u8, a.kind, b.kind) and
+            std.mem.eql(u8, a.name, b.name);
+    }
+};
+
+pub fn freeStoredAtoms(allocator: Allocator, atoms: []StoredAtom) void {
+    for (atoms) |a| a.deinit(allocator);
+    allocator.free(atoms);
+}
+
+pub fn freeOps(allocator: Allocator, ops: []Op) void {
+    for (ops) |op| op.deinit(allocator);
+    allocator.free(ops);
+}
+
+/// LoadWorkspaceAtoms reads `ws/<name>/ATOMS.jsonl` and enforces the 4096-Atom bound.
+pub fn loadWorkspaceAtoms(allocator: Allocator, fs: FS, root: []const u8, ws: []const u8) ![]StoredAtom {
+    const p = try workspaceAtomsPath(allocator, root, ws);
+    defer allocator.free(p);
+    if (!fs.exists(allocator, p)) {
+        return try allocator.alloc(StoredAtom, 0);
+    }
+    const b = try fs.readFile(allocator, p, MaxFileReadBytes);
+    defer allocator.free(b);
+
+    const lines = try readJSONLLines(allocator, b);
+    defer allocator.free(lines);
+
+    if (lines.len > MaxAtoms) {
+        return fsys.refuse("store_too_large", "atoms");
+    }
+
+    var atoms: std.ArrayList(StoredAtom) = .empty;
+    errdefer {
+        for (atoms.items) |a| a.deinit(allocator);
+        atoms.deinit(allocator);
+    }
+
+    for (lines) |line| {
+        const a = json.parseStoredAtom(allocator, line) catch {
+            return fsys.refuse("atom_malformed", "");
+        };
+        if (a.id.len == 0 or a.kind.len == 0 or a.name.len == 0) {
+            a.deinit(allocator);
+            return fsys.refuse("atom_malformed", "");
+        }
+        errdefer a.deinit(allocator);
+        try atoms.append(allocator, a);
+    }
+
+    return atoms.toOwnedSlice(allocator);
+}
+
+/// WriteWorkspaceAtoms writes `ws/<name>/ATOMS.jsonl` deterministically via `writeFileSafe`.
+pub fn writeWorkspaceAtoms(allocator: Allocator, fs: FS, root: []const u8, ws: []const u8, atoms: []const StoredAtom) !void {
+    if (atoms.len > MaxAtoms) {
+        return fsys.refuse("store_too_large", "atoms");
+    }
+    const sorted = try allocator.dupe(StoredAtom, atoms);
+    defer allocator.free(sorted);
+    sortStoredAtoms(sorted);
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    for (sorted) |a| {
+        try json.appendStoredAtom(&buf, allocator, a);
+        try buf.append(allocator, '\n');
+    }
+
+    const p = try workspaceAtomsPath(allocator, root, ws);
+    defer allocator.free(p);
+    try fs.writeFileSafe(allocator, p, buf.items);
+}
+
+/// LoadWorkspaceStage reads `ws/<name>/STAGE.jsonl` if present.
+pub fn loadWorkspaceStage(allocator: Allocator, fs: FS, root: []const u8, ws: []const u8) ![]Op {
+    const p = try workspaceStagePath(allocator, root, ws);
+    defer allocator.free(p);
+    if (!fs.exists(allocator, p)) {
+        return try allocator.alloc(Op, 0);
+    }
+    const b = try fs.readFile(allocator, p, MaxFileReadBytes);
+    defer allocator.free(b);
+
+    const lines = try readJSONLLines(allocator, b);
+    defer allocator.free(lines);
+
+    if (lines.len > MaxAtoms) {
+        return fsys.refuse("store_too_large", "atoms");
+    }
+
+    var ops: std.ArrayList(Op) = .empty;
+    errdefer {
+        for (ops.items) |op| op.deinit(allocator);
+        ops.deinit(allocator);
+    }
+
+    for (lines) |line| {
+        const op = json.parseOp(allocator, line) catch {
+            return fsys.refuse("stage_malformed", "");
+        };
+        if (op.type.len == 0 or op.atom_id.len == 0) {
+            op.deinit(allocator);
+            return fsys.refuse("stage_malformed", "");
+        }
+        errdefer op.deinit(allocator);
+        try ops.append(allocator, op);
+    }
+
+    return ops.toOwnedSlice(allocator);
+}
+
+/// WriteWorkspaceStage writes `ws/<name>/STAGE.jsonl` deterministically via `writeFileSafe`.
+pub fn writeWorkspaceStage(allocator: Allocator, fs: FS, root: []const u8, ws: []const u8, ops: []const Op) !void {
+    if (ops.len > MaxAtoms) {
+        return fsys.refuse("store_too_large", "atoms");
+    }
+    const sorted = try allocator.dupe(Op, ops);
+    defer allocator.free(sorted);
+    sortOps(sorted);
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    for (sorted) |op| {
+        try json.appendOp(&buf, allocator, op);
+        try buf.append(allocator, '\n');
+    }
+
+    const p = try workspaceStagePath(allocator, root, ws);
+    defer allocator.free(p);
+    try fs.writeFileSafe(allocator, p, buf.items);
+}
+
+/// WriteWorkspaceConfig writes `ws/<name>/WORKSPACE.json` via `writeFileSafe`.
+pub fn writeWorkspaceConfig(allocator: Allocator, fs: FS, root: []const u8, ws: Workspace) !void {
+    const p = try workspaceConfigPath(allocator, root, ws.name);
+    defer allocator.free(p);
+    const data = try json.marshalWorkspaceLine(allocator, ws);
+    defer allocator.free(data);
+    try fs.writeFileSafe(allocator, p, data);
+}
+
+/// CheckStaleHead re-reads the Stream record (rolling forward if the log moved)
+/// and refuses with `stale_head` if the head no longer equals `expected_head`.
+pub fn checkStaleHead(
+    allocator: Allocator,
+    fs: FS,
+    root: []const u8,
+    stream_id: []const u8,
+    expected_head: ?[]const u8,
+) !Stream {
+    const loaded = try loadStream(allocator, fs, root, stream_id);
+    freeChanges(allocator, loaded.changes);
+    errdefer loaded.stream.deinit(allocator);
+
+    if (!optStrEql(loaded.stream.head, expected_head)) {
+        return fsys.refuse("stale_head", "");
+    }
+    return loaded.stream;
+}
+
+/// AppendStreamChange executes steps (1) and (2) of ADR 0049's commit order:
+/// re-read the Stream record to check `stale_head`, append the Change JSON line
+/// with `appendSync`, and rewrite the Stream record with the new head.
+pub fn appendStreamChange(
+    allocator: Allocator,
+    fs: FS,
+    root: []const u8,
+    stream_id: []const u8,
+    expected_head: ?[]const u8,
+    c: Change,
+) !Stream {
+    var st = try checkStaleHead(allocator, fs, root, stream_id, expected_head);
+    errdefer st.deinit(allocator);
+
+    const line = try json.marshalChangeLine(allocator, c);
+    defer allocator.free(line);
+
+    const log_path = try streamLogPath(allocator, root, stream_id);
+    defer allocator.free(log_path);
+    try fs.appendSync(allocator, log_path, line);
+
+    const new_head = try allocator.dupe(u8, c.id);
+    if (st.head) |old_h| allocator.free(old_h);
+    st.head = new_head;
+
+    try writeStreamRecord(allocator, fs, root, st);
+    return st;
+}
+
+pub fn validWorkspaceName(name: []const u8) bool {
+    if (name.len == 0 or name.len > 32) return false;
+    for (name) |c| {
+        const ok = (c >= 'a' and c <= 'z') or (c >= '0' and c <= '9') or c == '-';
+        if (!ok) return false;
+    }
+    return true;
+}
+
+/// ApplyOpsToAtomMap applies a Change's Ops to an Atom table indexed by AtomID.
+/// When `mark_merge_origin` is true, added/modified/moved/renamed Atoms are marked
+/// with `origin = "merge"` (ADR 0049 §2).
+pub fn applyOpsToAtomMap(
+    allocator: Allocator,
+    atoms_by_id: *std.StringHashMap(StoredAtom),
+    ops: []const Op,
+    mark_merge_origin: bool,
+) !void {
+    const sorted = try allocator.dupe(Op, ops);
+    defer allocator.free(sorted);
+    sortOps(sorted);
+
+    for (sorted) |op| {
+        if (std.mem.eql(u8, op.type, "add")) {
+            const sp = if (op.new_span) |nsp|
+                try nsp.clone(allocator)
+            else
+                Span{ .file = try allocator.dupe(u8, ""), .start = 0, .end = 0 };
+            errdefer sp.deinit(allocator);
+
+            const id = try allocator.dupe(u8, op.atom_id);
+            errdefer allocator.free(id);
+            const kind = try allocator.dupe(u8, op.kind);
+            errdefer allocator.free(kind);
+            const name = try allocator.dupe(u8, op.new_name);
+            errdefer allocator.free(name);
+            const hash = try allocator.dupe(u8, op.new_hash);
+            errdefer allocator.free(hash);
+            const sig_hash = try allocator.dupe(u8, op.new_sig_hash);
+            errdefer allocator.free(sig_hash);
+            const origin = if (mark_merge_origin) try allocator.dupe(u8, "merge") else "";
+            errdefer if (origin.len > 0) allocator.free(origin);
+
+            const new_atom = StoredAtom{
+                .id = id,
+                .kind = kind,
+                .name = name,
+                .hash = hash,
+                .sig_hash = sig_hash,
+                .span = sp,
+                .origin = origin,
+            };
+
+            if (atoms_by_id.fetchRemove(op.atom_id)) |old_kv| {
+                allocator.free(old_kv.key);
+                old_kv.value.deinit(allocator);
+            }
+            const k = try allocator.dupe(u8, op.atom_id);
+            errdefer allocator.free(k);
+            try atoms_by_id.put(k, new_atom);
+        } else if (std.mem.eql(u8, op.type, "modify")) {
+            if (atoms_by_id.getPtr(op.atom_id)) |a_ptr| {
+                const new_h = try allocator.dupe(u8, op.new_hash);
+                allocator.free(a_ptr.hash);
+                a_ptr.hash = new_h;
+                if (op.new_sig_hash.len > 0) {
+                    const new_sh = try allocator.dupe(u8, op.new_sig_hash);
+                    allocator.free(a_ptr.sig_hash);
+                    a_ptr.sig_hash = new_sh;
+                }
+                if (op.new_span) |nsp| {
+                    const sp_copy = try nsp.clone(allocator);
+                    a_ptr.span.deinit(allocator);
+                    a_ptr.span = sp_copy;
+                }
+                if (mark_merge_origin and !std.mem.eql(u8, a_ptr.origin, "merge")) {
+                    const m_orig = try allocator.dupe(u8, "merge");
+                    if (a_ptr.origin.len > 0) allocator.free(a_ptr.origin);
+                    a_ptr.origin = m_orig;
+                }
+            } else {
+                const sp = if (op.new_span) |nsp|
+                    try nsp.clone(allocator)
+                else
+                    Span{ .file = try allocator.dupe(u8, ""), .start = 0, .end = 0 };
+                errdefer sp.deinit(allocator);
+                const id = try allocator.dupe(u8, op.atom_id);
+                errdefer allocator.free(id);
+                const kind = try allocator.dupe(u8, "");
+                errdefer allocator.free(kind);
+                const name = try allocator.dupe(u8, "");
+                errdefer allocator.free(name);
+                const hash = try allocator.dupe(u8, op.new_hash);
+                errdefer allocator.free(hash);
+                const sig_hash = try allocator.dupe(u8, op.new_sig_hash);
+                errdefer allocator.free(sig_hash);
+                const origin = if (mark_merge_origin) try allocator.dupe(u8, "merge") else "";
+                errdefer if (origin.len > 0) allocator.free(origin);
+                const k = try allocator.dupe(u8, op.atom_id);
+                errdefer allocator.free(k);
+                try atoms_by_id.put(k, .{
+                    .id = id,
+                    .kind = kind,
+                    .name = name,
+                    .hash = hash,
+                    .sig_hash = sig_hash,
+                    .span = sp,
+                    .origin = origin,
+                });
+            }
+        } else if (std.mem.eql(u8, op.type, "delete")) {
+            if (atoms_by_id.fetchRemove(op.atom_id)) |old_kv| {
+                allocator.free(old_kv.key);
+                old_kv.value.deinit(allocator);
+            }
+        } else if (std.mem.eql(u8, op.type, "move")) {
+            if (atoms_by_id.getPtr(op.atom_id)) |a_ptr| {
+                if (op.new_span) |nsp| {
+                    const sp_copy = try nsp.clone(allocator);
+                    a_ptr.span.deinit(allocator);
+                    a_ptr.span = sp_copy;
+                }
+                if (mark_merge_origin and !std.mem.eql(u8, a_ptr.origin, "merge")) {
+                    const m_orig = try allocator.dupe(u8, "merge");
+                    if (a_ptr.origin.len > 0) allocator.free(a_ptr.origin);
+                    a_ptr.origin = m_orig;
+                }
+            }
+        } else if (std.mem.eql(u8, op.type, "rename")) {
+            if (atoms_by_id.getPtr(op.atom_id)) |a_ptr| {
+                const new_n = try allocator.dupe(u8, op.new_name);
+                allocator.free(a_ptr.name);
+                a_ptr.name = new_n;
+                if (mark_merge_origin and !std.mem.eql(u8, a_ptr.origin, "merge")) {
+                    const m_orig = try allocator.dupe(u8, "merge");
+                    if (a_ptr.origin.len > 0) allocator.free(a_ptr.origin);
+                    a_ptr.origin = m_orig;
+                }
+            }
+        }
+    }
+}
+
+pub const ReplayResult = struct {
+    atoms: []StoredAtom,
+    replayed: usize,
+};
+
+/// ReplayStreamAtoms materializes the Atom table at `head_id` by replaying Ops
+/// along the parent chain, root -> head (ADR 0049 / M103d).
+pub fn replayStreamAtoms(
+    allocator: Allocator,
+    head_id: ?[]const u8,
+    all_changes: []const Change,
+) !ReplayResult {
+    if (head_id == null or head_id.?.len == 0) {
+        return .{
+            .atoms = try allocator.alloc(StoredAtom, 0),
+            .replayed = 0,
+        };
+    }
+
+    var changes_by_id = std.StringHashMap(Change).init(allocator);
+    defer changes_by_id.deinit();
+    for (all_changes) |c| {
+        try changes_by_id.put(c.id, c);
+    }
+
+    var chain: std.ArrayList(Change) = .empty;
+    defer chain.deinit(allocator);
+
+    var seen = std.StringHashMap(void).init(allocator);
+    defer seen.deinit();
+
+    var cur: []const u8 = head_id.?;
+    while (cur.len > 0) {
+        if (seen.contains(cur)) {
+            return fsys.refuse("change_malformed", cur);
+        }
+        try seen.put(cur, {});
+        const c = changes_by_id.get(cur) orelse {
+            return fsys.refuse("change_missing", cur);
+        };
+        try chain.append(allocator, c);
+        if (c.parent == null) break;
+        cur = c.parent.?;
+    }
+
+    std.mem.reverse(Change, chain.items);
+
+    var atoms_by_id = std.StringHashMap(StoredAtom).init(allocator);
+    defer {
+        var it = atoms_by_id.iterator();
+        while (it.next()) |kv| {
+            allocator.free(kv.key_ptr.*);
+            kv.value_ptr.deinit(allocator);
+        }
+        atoms_by_id.deinit();
+    }
+
+    for (chain.items) |c| {
+        try applyOpsToAtomMap(allocator, &atoms_by_id, c.ops, false);
+    }
+
+    var out: std.ArrayList(StoredAtom) = .empty;
+    errdefer {
+        for (out.items) |a| a.deinit(allocator);
+        out.deinit(allocator);
+    }
+
+    var it = atoms_by_id.iterator();
+    while (it.next()) |kv| {
+        const cloned = try kv.value_ptr.clone(allocator);
+        errdefer cloned.deinit(allocator);
+        try out.append(allocator, cloned);
+    }
+
+    const slice = try out.toOwnedSlice(allocator);
+    sortStoredAtoms(slice);
+    return .{
+        .atoms = slice,
+        .replayed = chain.items.len,
+    };
+}
+
+/// Selects the workspace for commands (`add`, `status`, `commit`, `log`, `merge`)
+/// per `resolveWorkspace` in `workspace.go`.
+pub fn resolveWorkspace(
+    allocator: Allocator,
+    fs: FS,
+    idx: *const StoreIndex,
+    ws_flag: []const u8,
+    path_args: []const []const u8,
+) !*const Workspace {
+    if (ws_flag.len > 0) {
+        return idx.workspaceByName(ws_flag) orelse fsys.refuse("ws_missing", ws_flag);
+    }
+    if (idx.workspaces.items.len == 1) {
+        return &idx.workspaces.items[0];
+    }
+    if (path_args.len > 0) {
+        var matched: ?*const Workspace = null;
+        for (idx.workspaces.items) |*ws| {
+            var all_under = true;
+            for (path_args) |p| {
+                const cp = fsys.cleanMemPath(p);
+                if (!std.mem.eql(u8, cp, ws.src)) {
+                    const prefix = try std.fmt.allocPrint(allocator, "{s}/", .{ws.src});
+                    defer allocator.free(prefix);
+                    if (!std.mem.startsWith(u8, cp, prefix)) {
+                        all_under = false;
+                        break;
+                    }
+                }
+            }
+            if (all_under) {
+                if (matched != null) {
+                    matched = null;
+                    break;
+                }
+                matched = ws;
+            }
+        }
+        if (matched) |m| return m;
+    }
+    if (idx.workspaces.items.len == 0) {
+        return fsys.refuse("ws_missing", "");
+    }
+
+    // Multiple workspaces and no path matched: check if exactly one has a stage.
+    var with_stage: ?*const Workspace = null;
+    var count: usize = 0;
+    for (idx.workspaces.items) |*ws| {
+        const stg_path = try workspaceStagePath(allocator, idx.root, ws.name);
+        defer allocator.free(stg_path);
+        if (fs.exists(allocator, stg_path)) {
+            with_stage = ws;
+            count += 1;
+        }
+    }
+    if (count == 1) {
+        return with_stage.?;
+    }
+    return fsys.refuse("ws_ambiguous", "");
+}
+
+/// Folds newly produced Ops into the existing staged Ops per ADR 0049 §1 and §2 step 2:
+/// - add + modify -> add (with newest hash, sig_hash, and span)
+/// - add + delete -> nothing (removed from stage)
+/// - modify + modify -> modify (first old_hash -> last new_hash)
+/// - modify + delete -> delete (first old_hash)
+pub fn foldStageOps(
+    allocator: Allocator,
+    existing: []const Op,
+    incoming: []const Op,
+    current_atoms: []const StoredAtom,
+) ![]Op {
+    var by_atom = std.StringHashMap(Op).init(allocator);
+    defer {
+        var it = by_atom.iterator();
+        while (it.next()) |kv| {
+            allocator.free(kv.key_ptr.*);
+            kv.value_ptr.deinit(allocator);
+        }
+        by_atom.deinit();
+    }
+
+    for (existing) |op| {
+        const cloned = try op.clone(allocator);
+        errdefer cloned.deinit(allocator);
+        if (by_atom.fetchRemove(op.atom_id)) |old_kv| {
+            allocator.free(old_kv.key);
+            old_kv.value.deinit(allocator);
+        }
+        const k = try allocator.dupe(u8, op.atom_id);
+        errdefer allocator.free(k);
+        try by_atom.put(k, cloned);
+    }
+
+    var span_by_id = std.StringHashMap(Span).init(allocator);
+    defer span_by_id.deinit();
+    for (current_atoms) |a| {
+        try span_by_id.put(a.id, a.span);
+    }
+
+    for (incoming) |op| {
+        const prev_ptr = by_atom.getPtr(op.atom_id);
+        if (prev_ptr == null) {
+            const cloned = try op.clone(allocator);
+            errdefer cloned.deinit(allocator);
+            const k = try allocator.dupe(u8, op.atom_id);
+            errdefer allocator.free(k);
+            try by_atom.put(k, cloned);
+            continue;
+        }
+        const prev = prev_ptr.?;
+        if (std.mem.eql(u8, prev.type, "add")) {
+            if (std.mem.eql(u8, op.type, "modify")) {
+                const nh = try allocator.dupe(u8, op.new_hash);
+                if (prev.new_hash.len > 0) allocator.free(prev.new_hash);
+                prev.new_hash = nh;
+
+                const nsh = try allocator.dupe(u8, op.new_sig_hash);
+                if (prev.new_sig_hash.len > 0) allocator.free(prev.new_sig_hash);
+                prev.new_sig_hash = nsh;
+
+                if (span_by_id.get(op.atom_id)) |sp| {
+                    const sp_copy = try sp.clone(allocator);
+                    if (prev.new_span) |old_sp| old_sp.deinit(allocator);
+                    prev.new_span = sp_copy;
+                }
+            } else if (std.mem.eql(u8, op.type, "delete")) {
+                if (by_atom.fetchRemove(op.atom_id)) |old_kv| {
+                    allocator.free(old_kv.key);
+                    old_kv.value.deinit(allocator);
+                }
+            }
+        } else if (std.mem.eql(u8, prev.type, "modify")) {
+            if (std.mem.eql(u8, op.type, "modify")) {
+                const nh = try allocator.dupe(u8, op.new_hash);
+                if (prev.new_hash.len > 0) allocator.free(prev.new_hash);
+                prev.new_hash = nh;
+
+                const nsh = try allocator.dupe(u8, op.new_sig_hash);
+                if (prev.new_sig_hash.len > 0) allocator.free(prev.new_sig_hash);
+                prev.new_sig_hash = nsh;
+            } else if (std.mem.eql(u8, op.type, "delete")) {
+                const first_old_hash = try allocator.dupe(u8, prev.old_hash);
+                errdefer allocator.free(first_old_hash);
+                const t_del = try allocator.dupe(u8, "delete");
+                errdefer allocator.free(t_del);
+                const aid = try allocator.dupe(u8, op.atom_id);
+                errdefer allocator.free(aid);
+
+                prev.deinit(allocator);
+                prev.* = .{
+                    .type = t_del,
+                    .atom_id = aid,
+                    .old_hash = first_old_hash,
+                };
+            }
+        } else {
+            const cloned = try op.clone(allocator);
+            prev.deinit(allocator);
+            prev.* = cloned;
+        }
+    }
+
+    // Refresh NewSpan on staged adds whose span shifted on an unchanged re-add.
+    var it = by_atom.iterator();
+    while (it.next()) |kv| {
+        if (std.mem.eql(u8, kv.value_ptr.type, "add")) {
+            if (span_by_id.get(kv.key_ptr.*)) |sp| {
+                const sp_copy = try sp.clone(allocator);
+                if (kv.value_ptr.new_span) |old_sp| old_sp.deinit(allocator);
+                kv.value_ptr.new_span = sp_copy;
+            }
+        }
+    }
+
+    var out: std.ArrayList(Op) = .empty;
+    errdefer {
+        for (out.items) |op| op.deinit(allocator);
+        out.deinit(allocator);
+    }
+
+    var it2 = by_atom.iterator();
+    while (it2.next()) |kv| {
+        const cloned = try kv.value_ptr.clone(allocator);
+        errdefer cloned.deinit(allocator);
+        try out.append(allocator, cloned);
+    }
+
+    const slice = try out.toOwnedSlice(allocator);
+    sortOps(slice);
+    return slice;
+}
