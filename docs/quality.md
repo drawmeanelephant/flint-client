@@ -64,7 +64,12 @@ validation, not a hand-maintained architecture picture.
 
 ## Coverage
 
-The Linux coverage job builds a Debug test binary, executes it under kcov,
+The Linux coverage job builds pinned upstream kcov v43 from source because
+Ubuntu 24.04 does not provide the `kcov` apt package. It installs build
+dependencies from Ubuntu and installs kcov under the runner's temporary
+directory, without adding a runtime dependency to FLINT.
+
+The job builds a Debug test binary, executes it under kcov,
 retains Cobertura reports, and enforces **70% measured source-line coverage**
 with `tools/check_coverage.py`. No report or no measured lines is a failure.
 This requires Linux ptrace support and kcov, not a new application dependency.

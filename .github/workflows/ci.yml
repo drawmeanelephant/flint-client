@@ -73,8 +73,30 @@ jobs:
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
         with:
           version: "0.17.0"
-      - name: Install coverage tool
-        run: sudo apt-get update && sudo apt-get install --yes kcov
+      - name: Check out pinned coverage tool
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: SimonKagstrom/kcov
+          ref: a39874f938ce13f7a65f253120d1ec946b349ffe # v43
+          # kcov's CMake version detection needs the release tags.
+          fetch-depth: 0
+          path: build/kcov-src
+          persist-credentials: false
+      - name: Install coverage build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            build-essential cmake binutils-dev libcurl4-openssl-dev \
+            libdw-dev libelf-dev libiberty-dev libssl-dev zlib1g-dev
+      - name: Build coverage tool
+        run: |
+          cmake -S build/kcov-src -B build/kcov-build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="$RUNNER_TEMP/kcov"
+          cmake --build build/kcov-build --parallel 2
+          cmake --install build/kcov-build
+          "$RUNNER_TEMP/kcov/bin/kcov" --version
+          echo "$RUNNER_TEMP/kcov/bin" >> "$GITHUB_PATH"
       - name: Compile and run instrumented tests
         run: |
           mkdir -p build

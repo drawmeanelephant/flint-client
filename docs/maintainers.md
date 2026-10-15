@@ -14,6 +14,10 @@ for checks, source-quality reports, command timings, coverage, and weekly
 three-run stability/throughput reports. Artifacts expire after 30 days.
 Enable GitHub Actions failure notifications for the maintainers.
 
+The Linux job builds pinned kcov v43 from source rather than depending on an
+unavailable Ubuntu 24.04 `kcov` package. Its build dependencies come from apt;
+the resulting tool is installed only under the runner's temporary directory.
+
 The first Linux kcov run must establish the real source-line coverage
 baseline against the enforced 70% floor. The reporter fails on absent/empty
 coverage. Do not silently lower the threshold or skip tests if it fails;
