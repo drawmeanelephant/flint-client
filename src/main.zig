@@ -11,6 +11,7 @@ pub const canon = @import("canon.zig");
 pub const parser = @import("parser/parser.zig");
 pub const render = @import("parser/render.zig");
 pub const workspace = @import("workspace.zig");
+pub const sign = @import("sign.zig");
 
 /// Runtime context for executing a `flint` command.
 /// Allows injecting an in-memory filesystem, custom writers, clock/RNG, and environment in tests.
@@ -234,6 +235,20 @@ pub fn runWithContext(ctx: Context, args: []const []const u8) u8 {
         return 0;
     }
 
+    if (std.mem.eql(u8, verb, "commit")) {
+        sign.cmdCommit(ctx.allocator, ctx.fs, root, uuid_gen, ctx.env_flint_sign_key, ctx.stdout, sub) catch |err| {
+            return handleErr(err, ctx.stdout);
+        };
+        return 0;
+    }
+
+    if (std.mem.eql(u8, verb, "log")) {
+        sign.cmdLog(ctx.allocator, ctx.fs, root, ctx.stdout, sub) catch |err| {
+            return handleErr(err, ctx.stdout);
+        };
+        return 0;
+    }
+
     if (std.mem.eql(u8, verb, "keygen")) {
         ed25519.cmdKeygen(ctx.allocator, ctx.fs, root, uuid_gen, sub, ctx.stdout) catch |err| {
             return handleErr(err, ctx.stdout);
@@ -260,6 +275,7 @@ test {
     _ = parser;
     _ = render;
     _ = workspace;
+    _ = sign;
 }
 
 const TestHarness = struct {
@@ -270,6 +286,7 @@ const TestHarness = struct {
     rng_seed: u8 = 1,
     root: []const u8 = "/host/FLINT",
     cwd: []const u8 = "/host",
+    env_sign_key: ?[]const u8 = null,
 
     fn init(allocator: Allocator) !*TestHarness {
         const h = try allocator.create(TestHarness);
@@ -315,6 +332,7 @@ const TestHarness = struct {
             .cwd = self.cwd,
             .uuid_gen = &self.uuid_gen,
             .env_flint_store = self.root,
+            .env_flint_sign_key = self.env_sign_key,
         };
         const rc = runWithContext(ctx, args);
         return .{
@@ -1627,4 +1645,345 @@ test "HostFS writeFileSafe and appendSync crash-safe file operations" {
     try std.testing.expectEqual(@as(usize, 1), entries.len);
     try std.testing.expectEqualStrings("ATOMS.jsonl", entries[0].name);
 }
+
+const rfc8032_seed_hex = "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60";
+const rfc8032_pub_hex = "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a";
+
+test "commit, log, verify, and roll-forward" {
+    const gpa = std.testing.allocator;
+    var host_fs = fsys.HostFS.init(std.testing.io);
+    const hfs = host_fs.fs();
+    const sample_go = try hfs.readFile(gpa, "testdata/corpus/go/sample.go", store.MaxFileReadBytes);
+    defer gpa.free(sample_go);
+
+    var h = try TestHarness.init(gpa);
+    defer h.deinit();
+    h.env_sign_key = rfc8032_seed_hex;
+    const mfs = h.mem.fs();
+    try mfs.writeFileSafe(gpa, "/host/src/go/sample.go", sample_go);
+
+    {
+        const res = try h.runCmd(&.{ "init", "--name=w", "--src=/host/src" });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+    }
+    {
+        const res = try h.runCmd(&.{ "add", "/host/src" });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+    }
+
+    var idx = try store.loadStoreIndex(gpa, mfs, h.root);
+    defer idx.deinit();
+    const ws = idx.workspaces.items[0];
+    const rec_path = try store.streamRecordPath(gpa, h.root, ws.stream);
+    defer gpa.free(rec_path);
+    const log_path = try store.streamLogPath(gpa, h.root, ws.stream);
+    defer gpa.free(log_path);
+
+    // 1. Inject a fault AFTER the append to streams/<id>.jsonl and BEFORE rewriting streams/<id>.json.
+    const FaultCtx = struct {
+        rec_path: []const u8,
+        fn beforeWrite(ctx: ?*anyopaque, op: []const u8, path: []const u8) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(ctx.?));
+            if (std.mem.eql(u8, op, "write") and std.mem.eql(u8, path, self.rec_path)) {
+                return error.SimulatedCrashBeforeRecordRewrite;
+            }
+        }
+    };
+    var fctx = FaultCtx{ .rec_path = rec_path };
+    h.mem.before_write_ctx = &fctx;
+    h.mem.before_write = FaultCtx.beforeWrite;
+
+    {
+        const res = try h.runCmd(&.{ "commit", "-m", "first commit\nextra detail" });
+        defer gpa.free(res.out);
+        h.mem.before_write = null;
+        try std.testing.expectEqual(@as(u8, 1), res.rc);
+    }
+
+    // Verify the stream log was written, while the stream record still has head == null.
+    try std.testing.expect(mfs.exists(gpa, log_path));
+    const raw_rec = try mfs.readFile(gpa, rec_path, store.MaxFileReadBytes);
+    defer gpa.free(raw_rec);
+    const stale_st = try json.parseStream(gpa, raw_rec);
+    defer stale_st.deinit(gpa);
+    try std.testing.expect(stale_st.head == null);
+
+    // Next `flint log` rolls the stale record forward and prints the first line of the message!
+    var first_id: []u8 = &.{};
+    defer if (first_id.len > 0) gpa.free(first_id);
+    {
+        const res = try h.runCmd(&.{"log"});
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+
+        const loaded = try store.loadStream(gpa, mfs, h.root, ws.stream);
+        defer loaded.deinit(gpa);
+        try std.testing.expectEqual(@as(usize, 1), loaded.changes.len);
+        try std.testing.expect(loaded.stream.head != null);
+        try std.testing.expectEqualStrings(loaded.changes[0].id, loaded.stream.head.?);
+        first_id = try gpa.dupe(u8, loaded.changes[0].id);
+
+        const want_log0 = try std.fmt.allocPrint(
+            gpa,
+            "flint: change {s} parent=none ops=4 author={s} msg=first commit\n",
+            .{ first_id, rfc8032_pub_hex[0..8] },
+        );
+        defer gpa.free(want_log0);
+        try std.testing.expectEqualStrings(want_log0, res.out);
+    }
+
+    // Clean up STAGE.jsonl left from the simulated crash and perform a second linear commit.
+    const stage_path = try store.workspaceStagePath(gpa, h.root, "w");
+    defer gpa.free(stage_path);
+    try mfs.remove(gpa, stage_path);
+
+    try mfs.writeFileSafe(
+        gpa,
+        "/host/src/go/sample.go",
+        "package sample\n\ntype Point struct { X, Y int }\nfunc Add(a, b int) int { return a - b }\nfunc Mul(a, b int) int { return a * b }\n",
+    );
+    h.now += 5;
+    {
+        const res = try h.runCmd(&.{ "add", "/host/src" });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+    }
+    {
+        const res = try h.runCmd(&.{ "commit", "-m", "second commit" });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+        try std.testing.expect(std.mem.startsWith(u8, res.out, "flint: commit ok id="));
+        const want_suffix = try std.fmt.allocPrint(gpa, " ops=2 parent={s}\n", .{first_id});
+        defer gpa.free(want_suffix);
+        try std.testing.expect(std.mem.endsWith(u8, res.out, want_suffix));
+    }
+    try std.testing.expect(!mfs.exists(gpa, stage_path));
+
+    // `flint log --stream=main` prints newest first (2 lines).
+    var second_id: []u8 = &.{};
+    defer if (second_id.len > 0) gpa.free(second_id);
+    {
+        const loaded = try store.loadStream(gpa, mfs, h.root, ws.stream);
+        defer loaded.deinit(gpa);
+        try std.testing.expectEqual(@as(usize, 2), loaded.changes.len);
+        second_id = try gpa.dupe(u8, loaded.changes[1].id);
+
+        const res = try h.runCmd(&.{ "log", "--stream=main" });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+        const want_log = try std.fmt.allocPrint(
+            gpa,
+            "flint: change {s} parent={s} ops=2 author={s} msg=second commit\nflint: change {s} parent=none ops=4 author={s} msg=first commit\n",
+            .{ second_id, first_id, rfc8032_pub_hex[0..8], first_id, rfc8032_pub_hex[0..8] },
+        );
+        defer gpa.free(want_log);
+        try std.testing.expectEqualStrings(want_log, res.out);
+    }
+
+    // `flint verify --all` and `flint verify <id>` both verify.
+    {
+        const res = try h.runCmd(&.{ "verify", "--all" });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+        const want = try std.fmt.allocPrint(
+            gpa,
+            "flint: verify {s} sig: verified\nflint: verify {s} sig: verified\n",
+            .{ first_id, second_id },
+        );
+        defer gpa.free(want);
+        try std.testing.expectEqualStrings(want, res.out);
+    }
+    {
+        const res = try h.runCmd(&.{ "verify", second_id });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+        const want = try std.fmt.allocPrint(gpa, "flint: verify {s} sig: verified\n", .{second_id});
+        defer gpa.free(want);
+        try std.testing.expectEqualStrings(want, res.out);
+    }
+}
+
+test "commit, log, and key resolution refusals" {
+    const gpa = std.testing.allocator;
+    var host_fs = fsys.HostFS.init(std.testing.io);
+    const hfs = host_fs.fs();
+    const sample_go = try hfs.readFile(gpa, "testdata/corpus/go/sample.go", store.MaxFileReadBytes);
+    defer gpa.free(sample_go);
+
+    var h = try TestHarness.init(gpa);
+    defer h.deinit();
+    h.env_sign_key = rfc8032_seed_hex;
+    const mfs = h.mem.fs();
+    try mfs.writeFileSafe(gpa, "/host/src/go/sample.go", sample_go);
+
+    {
+        const res = try h.runCmd(&.{ "init", "--name=w", "--src=/host/src" });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+    }
+
+    // 1. nothing_to_commit when stage is empty.
+    {
+        const res = try h.runCmd(&.{ "commit", "-m", "empty" });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 1), res.rc);
+        try std.testing.expectEqualStrings("flint: refuse nothing_to_commit\n", res.out);
+    }
+
+    {
+        const res = try h.runCmd(&.{ "add", "/host/src" });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+    }
+
+    // 2. message_invalid: empty, > 512 bytes, invalid UTF-8.
+    const too_long = try gpa.alloc(u8, 513);
+    defer gpa.free(too_long);
+    @memset(too_long, 'x');
+    const bad_utf8 = [_]u8{ 0xff, 0xfe, 0xfd };
+    for ([_][]const u8{ "", too_long, &bad_utf8 }) |bad_msg| {
+        const res = try h.runCmd(&.{ "commit", "-m", bad_msg });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 1), res.rc);
+        try std.testing.expectEqualStrings("flint: refuse message_invalid\n", res.out);
+    }
+
+    // 3. secret_not_found: store remains byte-identical, no file written!
+    var idx = try store.loadStoreIndex(gpa, mfs, h.root);
+    defer idx.deinit();
+    const ws = idx.workspaces.items[0];
+    const log_path = try store.streamLogPath(gpa, h.root, ws.stream);
+    defer gpa.free(log_path);
+    const stage_path = try store.workspaceStagePath(gpa, h.root, "w");
+    defer gpa.free(stage_path);
+    const stage_before = try mfs.readFile(gpa, stage_path, store.MaxFileReadBytes);
+    defer gpa.free(stage_before);
+
+    h.env_sign_key = null;
+    const WriteSpy = struct {
+        wrote_any: bool = false,
+        fn hook(ctx: ?*anyopaque, _: []const u8, _: []const u8) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(ctx.?));
+            self.wrote_any = true;
+        }
+    };
+    var spy = WriteSpy{};
+    h.mem.before_write_ctx = &spy;
+    h.mem.before_write = WriteSpy.hook;
+
+    {
+        const res = try h.runCmd(&.{ "commit", "-m", "no secret" });
+        defer gpa.free(res.out);
+        h.mem.before_write = null;
+        try std.testing.expectEqual(@as(u8, 1), res.rc);
+        try std.testing.expectEqualStrings("flint: refuse secret_not_found\n", res.out);
+    }
+    try std.testing.expect(!spy.wrote_any);
+    try std.testing.expect(!mfs.exists(gpa, log_path));
+    try std.testing.expect(mfs.exists(gpa, stage_path));
+    const stage_after = try mfs.readFile(gpa, stage_path, store.MaxFileReadBytes);
+    defer gpa.free(stage_after);
+    try std.testing.expectEqualStrings(stage_before, stage_after);
+
+    // 4. secret_malformed: short key file content, uppercase hex, non-hex; seed never leaks to stdout/stderr.
+    try mfs.writeFileSafe(gpa, "/host/FLINT/keys/bad", "deadbeef\n");
+    {
+        const res = try h.runCmd(&.{ "commit", "--key=bad", "-m", "bad secret file" });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 1), res.rc);
+        try std.testing.expectEqualStrings("flint: refuse secret_malformed\n", res.out);
+        try std.testing.expect(std.mem.indexOf(u8, res.out, "deadbeef") == null);
+    }
+    try mfs.remove(gpa, "/host/FLINT/keys/bad");
+
+    const upper_seed = "9D61B19DEFFD5A60BA844AF492EC2CC44449C5697B326919703BAC031CAE7F60";
+    const g_seed = "gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg";
+    for ([_][]const u8{ upper_seed, g_seed }) |bad_hex| {
+        h.env_sign_key = bad_hex;
+        const res = try h.runCmd(&.{ "commit", "-m", "bad secret" });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 1), res.rc);
+        try std.testing.expectEqualStrings("flint: refuse secret_malformed\n", res.out);
+        try std.testing.expect(std.mem.indexOf(u8, res.out, bad_hex[0..8]) == null);
+    }
+    h.env_sign_key = rfc8032_seed_hex;
+
+    // 5. stale_head: concurrent head move before appendStreamChange.
+    const StaleCtx = struct {
+        gpa: Allocator,
+        fs: fsys.FS,
+        root: []const u8,
+        stream_id: []const u8,
+        created: i64,
+        fn hook(ctx: ?*anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(ctx.?));
+            const moved = "0199de2d-dc00-7000-8000-000000000777";
+            store.writeStreamRecord(self.gpa, self.fs, self.root, .{
+                .id = self.stream_id,
+                .name = "main",
+                .head = moved,
+                .created = self.created,
+                .forked_from = null,
+            }) catch {};
+        }
+    };
+    var sctx = StaleCtx{
+        .gpa = gpa,
+        .fs = mfs,
+        .root = h.root,
+        .stream_id = ws.stream,
+        .created = h.now * 1000,
+    };
+    sign.before_commit_append_ctx = &sctx;
+    sign.before_commit_append = StaleCtx.hook;
+    {
+        const res = try h.runCmd(&.{ "commit", "-m", "concurrent move" });
+        defer gpa.free(res.out);
+        sign.before_commit_append = null;
+        try std.testing.expectEqual(@as(u8, 1), res.rc);
+        try std.testing.expectEqualStrings("flint: refuse stale_head\n", res.out);
+    }
+    try std.testing.expect(!mfs.exists(gpa, log_path));
+
+    // Restore stream record head to null and test stream_torn on streams/<id>.jsonl.
+    try store.writeStreamRecord(gpa, mfs, h.root, .{
+        .id = ws.stream,
+        .name = "main",
+        .head = null,
+        .created = h.now * 1000,
+        .forked_from = null,
+    });
+    try mfs.writeFileSafe(gpa, log_path, "{\"id\":\"0199de2d-dc00-7000-8000-000000000100\"}");
+    {
+        const res = try h.runCmd(&.{"log"});
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 1), res.rc);
+        try std.testing.expectEqualStrings("flint: refuse stream_torn\n", res.out);
+    }
+
+    // 6. Test sole key in `<store>/keys/default` resolution when env_sign_key is null,
+    // and ensure seed never appears in any store file outside `<store>/keys/`.
+    try mfs.remove(gpa, log_path);
+    h.env_sign_key = null;
+    {
+        const res = try h.runCmd(&.{ "keygen", "--name=default" });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+    }
+    {
+        const res = try h.runCmd(&.{ "commit", "-m", "signed by sole store key" });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+        try std.testing.expect(std.mem.startsWith(u8, res.out, "flint: commit ok id="));
+    }
+    const key_raw = try mfs.readFile(gpa, "/host/FLINT/keys/default", store.MaxFileReadBytes);
+    defer gpa.free(key_raw);
+    const key_seed = std.mem.trimEnd(u8, key_raw, "\n");
+    const log_raw = try mfs.readFile(gpa, log_path, store.MaxFileReadBytes);
+    defer gpa.free(log_raw);
+    try std.testing.expect(std.mem.indexOf(u8, log_raw, key_seed) == null);
+}
+
 
