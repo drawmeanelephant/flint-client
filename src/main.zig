@@ -1614,6 +1614,53 @@ test "stage fold rules and status" {
         try std.testing.expectEqual(@as(u8, 0), res.rc);
         try std.testing.expectEqualStrings("flint: add files=1 new=0 modified=0 deleted=6 unchanged=2\n", res.out);
     }
+
+    // Untracked nonexistent directory/extensionless arg -> refuse src_missing.
+    {
+        const res = try h.runCmd(&.{ "add", "/host/src/nonexistent_dir" });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 1), res.rc);
+        try std.testing.expectEqualStrings("flint: refuse src_missing /host/src/nonexistent_dir\n", res.out);
+    }
+
+    // Disappeared directory arg with tracked files -> stages deletes for its tracked files.
+    try mfs.writeFileSafe(gpa, "/host/src/sub/mod.zig", sample_zig);
+    {
+        const res = try h.runCmd(&.{ "add", "/host/src/sub" });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+        try std.testing.expectEqualStrings("flint: add files=1 new=6 modified=0 deleted=0 unchanged=0\n", res.out);
+    }
+    try mfs.remove(gpa, "/host/FLINT/ws/w/STAGE.jsonl");
+    try mfs.remove(gpa, "/host/src/sub/mod.zig");
+    try mfs.remove(gpa, "/host/src/sub");
+    {
+        const res = try h.runCmd(&.{ "add", "/host/src/sub" });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+        try std.testing.expectEqualStrings("flint: add files=0 new=0 modified=0 deleted=6 unchanged=0\n", res.out);
+    }
+
+    // Missing ws.src root (when entire src tree vanishes) -> flint add (no args) stages deletes
+    // for the remaining tracked files instead of silently printing 0s.
+    try mfs.remove(gpa, "/host/FLINT/ws/w/STAGE.jsonl");
+    try mfs.remove(gpa, "/host/src/go/sample.go");
+    try mfs.remove(gpa, "/host/src/go");
+    try mfs.remove(gpa, "/host/src/zig");
+    try mfs.remove(gpa, "/host/src");
+    {
+        const res = try h.runCmd(&.{"add"});
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+        try std.testing.expectEqualStrings("flint: add files=0 new=0 modified=0 deleted=2 unchanged=0\n", res.out);
+    }
+    // Once no atoms remain tracked and ws.src is still missing, flint add refuses src_missing.
+    {
+        const res = try h.runCmd(&.{"add"});
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 1), res.rc);
+        try std.testing.expectEqualStrings("flint: refuse src_missing /host/src\n", res.out);
+    }
 }
 
 test "parse error and duplicate decl all-or-nothing" {

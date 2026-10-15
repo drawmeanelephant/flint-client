@@ -648,12 +648,19 @@ pub const MemFS = struct {
         if (self.before_write) |hook| {
             try hook(self.before_write_ctx, "remove", p);
         }
-        const kv = self.files.fetchRemove(p) orelse return error.FileNotFound;
-        self.allocator.free(kv.key);
-        self.allocator.free(kv.value);
-        if (self.modes.fetchRemove(p)) |mkv| {
-            self.allocator.free(mkv.key);
+        if (self.files.fetchRemove(p)) |kv| {
+            self.allocator.free(kv.key);
+            self.allocator.free(kv.value);
+            if (self.modes.fetchRemove(p)) |mkv| {
+                self.allocator.free(mkv.key);
+            }
+            return;
         }
+        if (self.dirs.fetchRemove(p)) |dkv| {
+            self.allocator.free(dkv.key);
+            return;
+        }
+        return error.FileNotFound;
     }
 
     fn existsImpl(ptr: *anyopaque, allocator: Allocator, path: []const u8) bool {
