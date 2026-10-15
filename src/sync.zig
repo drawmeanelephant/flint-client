@@ -836,7 +836,12 @@ pub fn cmdClone(
 
     const abs_src = try fsys.cleanPath(allocator, src_flag);
     defer allocator.free(abs_src);
-    if (!fs.exists(allocator, abs_src) or !fs.isDir(allocator, abs_src)) {
+    if (!fs.exists(allocator, abs_src)) {
+        // Unlike `init`, clone almost always targets a fresh directory —
+        // create it rather than refusing `src_missing` (#32).
+        fs.mkdir(allocator, abs_src) catch return fsys.refuse("src_missing", src_flag);
+    }
+    if (!fs.isDir(allocator, abs_src)) {
         return fsys.refuse("src_missing", src_flag);
     }
 
