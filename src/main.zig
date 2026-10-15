@@ -123,6 +123,7 @@ fn friendlyErrorName(err: anyerror) []const u8 {
         error.ConnectionRefused => "connection refused",
         error.ConnectionResetByPeer => "connection reset by peer",
         error.ConnectionTimedOut => "connection timed out",
+        error.Timeout => "timed out",
         error.UnknownHostName => "unknown host",
         error.NameServerFailure => "name resolution failed",
         error.HostUnreachable => "host unreachable",
@@ -3567,6 +3568,31 @@ test "transport errors print verb + remote context, not raw error names (#31)" {
         defer gpa.free(res.out);
         try std.testing.expectEqual(@as(u8, 1), res.rc);
         try std.testing.expectEqualStrings("flint: refuse remote_missing\n", res.out);
+    }
+}
+
+test "--read-timeout=0 refuses usage on remote verbs; silent peer times out (#51)" {
+    const gpa = std.testing.allocator;
+    var h = try TestHarness.init(gpa);
+    defer h.deinit();
+    const fs = h.mem.fs();
+    try fs.mkdir(gpa, "/host/SRCA");
+    {
+        const res = try h.runCmd(&.{ "init", "--name=a", "--src=/host/SRCA" });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+    }
+
+    for ([_][]const []const u8{
+        &.{ "push", "--read-timeout=0" },
+        &.{ "push", "--read-timeout=abc" },
+        &.{ "pull", "--read-timeout", "0" },
+        &.{ "clone", "tcp://127.0.0.1:1", "--stream=main", "--name=b", "--src=/host/SRCB", "--read-timeout=0" },
+    }) |cmd| {
+        const res = try h.runCmd(cmd);
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 2), res.rc);
+        try std.testing.expectEqualStrings("flint: refuse usage\n", res.out);
     }
 }
 
