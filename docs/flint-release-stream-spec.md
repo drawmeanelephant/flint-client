@@ -31,8 +31,14 @@ not require).
 - **Refusal names are snake_case and contractual.** Exactly four new
   names: `release_missing`, `release_malformed`, `release_untrusted`,
   `release_mismatch`. Everything else reuses the client spec's
-  vocabulary. Exit codes unchanged: `0` success, `1` refusal, `2` usage;
-  `flint: refuse <name>`.
+  vocabulary. `release_untrusted` deliberately does not reuse the wire
+  `author_not_allowed`: that name is the server's append allowlist
+  (who may write the stream at all), while this refusal is the
+  consumer's release-keyring decision (who may declare release values)
+  — a writer the server allows need not be a publisher the consumer
+  trusts. Exit codes follow the client spec unchanged: `0` success,
+  `1` refusal or error, `2` usage error (its merge-conflict `2` does
+  not arise in this pipeline); `flint: refuse <name>`.
 - Never print ELF content, key material, or seeds; diagnostics on stderr.
 
 ## 1. The release stream and `release.go`
@@ -63,15 +69,22 @@ Normative form, enforced by the consumer at decode time:
   qualified name `release.Release{Name,Version,ELFSHA256,ManifestRow}`.
   The atom span runs from the const name through the value literal (the
   `const` keyword is outside the span), so the canonical token stream is
-  `_ = "<literal>"` — the signed `new_hash` covers the *value*, while the
-  name is bound through the op's `atom_id`/`new_name`, inside `ops_hash`,
+  `_ = "<literal>"` — the signed `new_hash` covers the literal's raw
+  source spelling, quotes and escapes included, not the decoded value:
+  `"\x46"` and `"F"` decode identically but hash differently, and the
+  consumer decodes only after the hash check (§3 step 4). The name is
+  bound through the op's `atom_id`/`new_name`, inside `ops_hash`,
   inside `sig`. Other declarations in `release.go` are ordinary atoms and
   carry no release meaning.
-- A **release event** is a signed Change carrying `add`/`modify` ops on at
-  least one of the four release atoms. The **release state** at a Change is
-  the atom-table state of the four consts there. Consts whose literals do
-  not change produce no op, so a typical release Change modifies only
-  `ReleaseVersion`, `ReleaseELFSHA256`, and `ReleaseManifestRow`.
+- A **release event** is a signed Change whose ops touch the
+  release-atom positions: `add`/`modify` on one of the four atoms, or a
+  `rename`, `move`, or `delete` that binds an atom into or out of a
+  `(release.go, release.Release*)` position — a rename landing a new
+  `release.go` atom counts even though it changes no hash. The
+  **release state** at a Change is the atom-table state of the four
+  consts there. Consts whose literals do not change produce no op, so a
+  typical release Change modifies only `ReleaseVersion`,
+  `ReleaseELFSHA256`, and `ReleaseManifestRow`.
 
 ## 2. Value grammar
 
@@ -93,19 +106,34 @@ same order) runs these steps **in order**, refusing at the first failure:
 1. **Sync and verify.** Obtain the stream by any transport — `clone`,
    `pull`, or a patch bundle — and re-verify every Change on the
    first-parent chain to head (pull's rule: `sig_invalid` aborts; nothing
-   unverified is used).
+   unverified is used). `flint verify` checks each Change's signature —
+   integrity and which key signed — only; it does not establish parent
+   linkage or that a log is the stream's current head. `clone` and
+   `pull` enforce the chain-to-head rule on their own fetches; any other
+   channel leaves the consumer to do that walk itself.
 2. **Resolve the release state.** In the atom table at head, resolve the
    four release atoms by `(file="release.go", kind="const",
    name="release.Release*")`. Any absent → `release_missing`. A const that
    was renamed away or deleted is absent.
-3. **Trust.** For each release const, find its **declaring change** — the
-   newest Change that set its current hash. Every distinct declaring
-   change's `author` must be a member of the consumer's release keyring
-   (a set of Ed25519 public keys; VirelaiOS sources it from the M101b
-   keyring path) → `release_untrusted`. Checking the declaring changes —
-   not only the head — is required: a trusted head cannot vouch for consts
-   last set by an untrusted earlier Change. The normal case is one release
-   Change declaring all four: one author check.
+3. **Trust.** For each release const, find its **declaring changes** —
+   the newest Change that established the atom's current `(file, name)`
+   binding (`add`, `rename`, or `move`) and the newest Change that
+   established its current hash (`add` or `modify`); one Change may be
+   both. Every distinct declaring change's `author` must be a member of
+   the consumer's release keyring (a set of Ed25519 public keys;
+   VirelaiOS sources it from the M101b keyring path) →
+   `release_untrusted`. Checking the declaring changes — not only the
+   head — is required: a trusted head cannot vouch for consts last set
+   by an untrusted earlier Change. Covering the binding, not only the
+   hash, is required too: `rename` and `move` carry no `new_hash`, so a
+   hash-only check would let an untrusted Change rebind a trusted-hash
+   atom into a release position — recombining previously-signed values
+   (v1's manifest row beside v2's ELF hash, or a rolled-back version
+   label) that no trusted author announced. Both lookups ride the same
+   first-parent walk of already-verified Changes: the binding ops carry
+   `atom_id` + `new_name`/`new_span` inside `ops_hash`, inside `sig`, so
+   each binding's author is authenticated. The normal case is one
+   release Change declaring all four: one author check.
 4. **Authenticate `release.go` bytes.** Obtain the file's text at head
    state by any channel — a blob checkout, a source export, or the same
    untrusted path the ELF will take — and run the declaration scanner.
@@ -131,7 +159,7 @@ same order) runs these steps **in order**, refusing at the first failure:
 |---|---|
 | A release atom absent at the verified head (missing const, renamed away, file never present) | `release_missing` |
 | `release.go` fails to scan; recomputed atom hash ≠ signed head hash; const violates §1 form or §2 grammar | `release_malformed` |
-| A declaring change's `author` not in the consumer's release keyring | `release_untrusted` |
+| A binding- or hash-declaring change's `author` not in the consumer's release keyring — including an untrusted `rename`/`move` rebinding a trusted-hash atom into a release position | `release_untrusted` |
 | `sha256(fetched ELF)` ≠ `ReleaseELFSHA256` | `release_mismatch` |
 | Any Change signature failure during step 1 | `sig_invalid` (existing) |
 | Stream unknown | `stream_missing` (existing) |
@@ -151,7 +179,7 @@ consumers' keyrings trust. Nothing requires the tool — a hand-written
 | Suite | Pass condition |
 |---|---|
 | Format goldens | A reference `release.go` scans to exactly the four `const` atoms with pinned names, spans, and hashes; each §2 grammar accepts its good fixtures and refuses its bad ones (uppercase hex, 63-char hash, `\n` in the row, typed const, multi-name spec). |
-| Pipeline | Trusted declaring author → pass through step 6. Untrusted declaring author → `release_untrusted`. Missing const → `release_missing`. Literal edited after signing (hash no longer matches) → `release_malformed`. ELF byte flip → `release_mismatch`. Each leg asserts no installed state was created or modified. |
+| Pipeline | Trusted declaring author → pass through step 6. Untrusted declaring author → `release_untrusted`. Untrusted `rename`/`move` rebinding a trusted-hash atom into a release position → `release_untrusted`. Missing const → `release_missing`. Literal edited after signing (hash no longer matches) → `release_malformed`. ELF byte flip → `release_mismatch`. Each leg asserts no installed state was created or modified. |
 | Partial coverage | A head reachable only through Changes whose declaring authors mix trusted and untrusted keys → `release_untrusted`; a release where only some consts moved declares only those consts' authors. |
 
 ## 7. Open questions
@@ -159,6 +187,10 @@ consumers' keyrings trust. Nothing requires the tool — a hand-written
 - **Weaker trust rule.** "Head author ∈ keyring" alone was considered and
   rejected: it authenticates the announcement but not who set the consts.
   The declaring-change rule costs one extra walk and no new machinery.
+- **Hash-only declaring change.** Anchoring trust to "who set the hash"
+  alone would leave the `(file, name)` binding unauthenticated —
+  `rename`/`move` carry no `new_hash` — so §3 step 3 checks the
+  binding-establishing Change as well, on the same verified-log walk.
 - **`ReleaseManifestRow` as structured consts.** Splitting the row into
   typed fields (name/version/paths) would make it self-checking but
   duplicates the guest's schema-v2 grammar in FLINT's vocabulary; the row
