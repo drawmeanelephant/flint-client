@@ -7,6 +7,9 @@ pub const uuid = @import("uuid.zig");
 pub const store = @import("store.zig");
 pub const json = @import("json.zig");
 pub const ed25519 = @import("ed25519.zig");
+pub const canon = @import("canon.zig");
+pub const parser = @import("parser/parser.zig");
+pub const render = @import("parser/render.zig");
 
 /// Runtime context for executing a `flint` command.
 /// Allows injecting an in-memory filesystem, custom writers, clock/RNG, and environment in tests.
@@ -169,11 +172,10 @@ pub fn runWithContext(ctx: Context, args: []const []const u8) u8 {
     }
 
     if (std.mem.eql(u8, verb, "parse-corpus")) {
-        if (sub.len != 1 or sub[0].len == 0) {
-            printUsage(ctx.stdout);
-            return 2;
-        }
-        return handleErr(fsys.refuse("usage", ""), ctx.stdout);
+        render.cmdParseCorpus(ctx.allocator, ctx.fs, sub, ctx.stdout) catch |err| {
+            return handleErr(err, ctx.stdout);
+        };
+        return 0;
     }
 
     const is_known_store_verb = std.mem.eql(u8, verb, "keygen") or
@@ -227,6 +229,9 @@ test {
     _ = store;
     _ = json;
     _ = ed25519;
+    _ = canon;
+    _ = parser;
+    _ = render;
 }
 
 const TestHarness = struct {
@@ -677,4 +682,295 @@ test "store root resolution order (--store -> FLINT_STORE -> walk up .flint/ or 
         try std.testing.expectEqualStrings("store_not_found", fsys.last_refuse.code());
         try std.testing.expectEqualStrings("/nowhere/dir", fsys.last_refuse.detail());
     }
+}
+
+const ManifestAtom = struct {
+    file: []const u8,
+    kind: []const u8,
+    name: []const u8,
+    start: u32,
+    end: u32,
+    hash: []const u8,
+    sig_hash: []const u8,
+};
+
+const ManifestDoc = struct {
+    version: i64,
+    files: i64,
+    atoms: []ManifestAtom,
+};
+
+fn parseSingleTestAtom(allocator: Allocator, fs: fsys.FS, rel_file: []const u8) !parser.Atom {
+    const path = try std.fmt.allocPrint(allocator, "testdata/corpus/{s}", .{rel_file});
+    defer allocator.free(path);
+    const src = try fs.readFile(allocator, path, store.MaxFileReadBytes);
+    defer allocator.free(src);
+    var perr: ?parser.ParseErrorInfo = null;
+    const atoms = try parser.parseFile(allocator, rel_file, src, null, &perr);
+    errdefer parser.freeAtoms(allocator, atoms);
+    try std.testing.expectEqual(@as(usize, 1), atoms.len);
+    const a = atoms[0];
+    allocator.free(atoms);
+    return a;
+}
+
+test "Zig corpus matches MANIFEST.json (all 50 .zig files)" {
+    const gpa = std.testing.allocator;
+    var host_fs = fsys.HostFS.init(std.testing.io);
+    const fs = host_fs.fs();
+
+    const entries = try fs.list(gpa, "testdata/corpus/zig");
+    defer fsys.FS.freeDirEntries(gpa, entries);
+
+    var zig_files: usize = 0;
+    var got_atoms: std.ArrayList(parser.Atom) = .empty;
+    defer {
+        for (got_atoms.items) |*a| a.deinit(gpa);
+        got_atoms.deinit(gpa);
+    }
+
+    for (entries) |e| {
+        if (e.is_dir or !std.mem.endsWith(u8, e.name, ".zig")) continue;
+        zig_files += 1;
+        const rel = try std.fmt.allocPrint(gpa, "zig/{s}", .{e.name});
+        defer gpa.free(rel);
+        const full = try std.fmt.allocPrint(gpa, "testdata/corpus/zig/{s}", .{e.name});
+        defer gpa.free(full);
+
+        const src = try fs.readFile(gpa, full, store.MaxFileReadBytes);
+        defer gpa.free(src);
+
+        var perr: ?parser.ParseErrorInfo = null;
+        const atoms = try parser.parseFile(gpa, rel, src, null, &perr);
+        defer gpa.free(atoms);
+        for (atoms) |a| {
+            try got_atoms.append(gpa, a);
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 50), zig_files);
+
+    const manifest_raw = try fs.readFile(gpa, "testdata/corpus/MANIFEST.json", store.MaxFileReadBytes);
+    defer gpa.free(manifest_raw);
+    const parsed_manifest = try std.json.parseFromSlice(ManifestDoc, gpa, manifest_raw, .{ .ignore_unknown_fields = true });
+    defer parsed_manifest.deinit();
+
+    var want_zig: std.ArrayList(ManifestAtom) = .empty;
+    defer want_zig.deinit(gpa);
+    for (parsed_manifest.value.atoms) |ma| {
+        if (std.mem.startsWith(u8, ma.file, "zig/")) {
+            try want_zig.append(gpa, ma);
+        }
+    }
+
+    try std.testing.expectEqual(want_zig.items.len, got_atoms.items.len);
+
+    var sample_fn: usize = 0;
+    var sample_struct: usize = 0;
+    var sample_const: usize = 0;
+    var sample_test: usize = 0;
+    var kind_fn: usize = 0;
+    var kind_test: usize = 0;
+    var kind_struct: usize = 0;
+    var kind_enum: usize = 0;
+    var kind_union: usize = 0;
+    var kind_const: usize = 0;
+    var kind_var: usize = 0;
+
+    for (got_atoms.items, 0..) |a, idx| {
+        const m = want_zig.items[idx];
+        const got_hash = std.fmt.bytesToHex(a.hash, .lower);
+        const got_sig = std.fmt.bytesToHex(a.sig_hash, .lower);
+        try std.testing.expectEqualStrings(m.file, a.file);
+        try std.testing.expectEqualStrings(m.kind, a.kind);
+        try std.testing.expectEqualStrings(m.name, a.name);
+        try std.testing.expectEqual(m.start, a.start);
+        try std.testing.expectEqual(m.end, a.end);
+        try std.testing.expectEqualStrings(m.hash, &got_hash);
+        try std.testing.expectEqualStrings(m.sig_hash, &got_sig);
+
+        if (std.mem.eql(u8, a.file, "zig/sample.zig")) {
+            if (std.mem.eql(u8, a.kind, "fn")) sample_fn += 1;
+            if (std.mem.eql(u8, a.kind, "struct")) sample_struct += 1;
+            if (std.mem.eql(u8, a.kind, "const")) sample_const += 1;
+            if (std.mem.eql(u8, a.kind, "test")) sample_test += 1;
+        }
+        if (std.mem.eql(u8, a.kind, "fn")) kind_fn += 1;
+        if (std.mem.eql(u8, a.kind, "test")) kind_test += 1;
+        if (std.mem.eql(u8, a.kind, "struct")) kind_struct += 1;
+        if (std.mem.eql(u8, a.kind, "enum")) kind_enum += 1;
+        if (std.mem.eql(u8, a.kind, "union")) kind_union += 1;
+        if (std.mem.eql(u8, a.kind, "const")) kind_const += 1;
+        if (std.mem.eql(u8, a.kind, "var")) kind_var += 1;
+    }
+
+    try std.testing.expectEqual(@as(usize, 3), sample_fn);
+    try std.testing.expectEqual(@as(usize, 1), sample_struct);
+    try std.testing.expectEqual(@as(usize, 1), sample_const);
+    try std.testing.expectEqual(@as(usize, 1), sample_test);
+    try std.testing.expect(kind_fn >= 3);
+    try std.testing.expect(kind_test >= 3);
+    try std.testing.expect(kind_struct >= 3);
+    try std.testing.expect(kind_enum >= 3);
+    try std.testing.expect(kind_union >= 3);
+    try std.testing.expect(kind_const >= 3);
+    try std.testing.expect(kind_var >= 3);
+}
+
+test "Zig canonical token streams match testdata/canon/zig_*.txt and scientific notation" {
+    const gpa = std.testing.allocator;
+    var host_fs = fsys.HostFS.init(std.testing.io);
+    const fs = host_fs.fs();
+
+    const CanonCase = struct {
+        fixture: []const u8,
+        rel_file: []const u8,
+        atom_name: []const u8,
+        kind: []const u8,
+    };
+    const cases = [_]CanonCase{
+        .{ .fixture = "zig_sample_add.txt", .rel_file = "zig/sample.zig", .atom_name = "sample.add", .kind = "fn" },
+        .{ .fixture = "zig_containers_Packed.txt", .rel_file = "zig/containers.zig", .atom_name = "containers.Packed", .kind = "struct" },
+        .{ .fixture = "zig_sample_test.txt", .rel_file = "zig/sample.zig", .atom_name = "sample.test:add works", .kind = "test" },
+    };
+
+    for (cases) |cc| {
+        const fix_path = try std.fmt.allocPrint(gpa, "testdata/canon/{s}", .{cc.fixture});
+        defer gpa.free(fix_path);
+        const want_bytes = try fs.readFile(gpa, fix_path, store.MaxFileReadBytes);
+        defer gpa.free(want_bytes);
+        const want = std.mem.trimEnd(u8, want_bytes, "\r\n");
+
+        const src_path = try std.fmt.allocPrint(gpa, "testdata/corpus/{s}", .{cc.rel_file});
+        defer gpa.free(src_path);
+        const src = try fs.readFile(gpa, src_path, store.MaxFileReadBytes);
+        defer gpa.free(src);
+
+        var perr: ?parser.ParseErrorInfo = null;
+        var cmap = try parser.canonMap(gpa, cc.rel_file, src, &perr);
+        defer parser.freeCanonMap(gpa, &cmap);
+
+        const got = cmap.get(cc.atom_name) orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqualStrings(want, got);
+
+        const atoms = try parser.parseFile(gpa, cc.rel_file, src, null, &perr);
+        defer parser.freeAtoms(gpa, atoms);
+        var found_hash: ?[32]u8 = null;
+        for (atoms) |a| {
+            if (std.mem.eql(u8, a.name, cc.atom_name)) {
+                found_hash = a.hash;
+                break;
+            }
+        }
+        const expect_hash = canon.hashDomainBody(canon.atom_domain, cc.kind, want);
+        try std.testing.expectEqual(expect_hash, found_hash.?);
+    }
+
+    // Scientific notation literals stay a single token in canonMap
+    var perr: ?parser.ParseErrorInfo = null;
+    var sci_map = try parser.canonMap(gpa, "sci.zig", "const eps: f64 = 1e-5;\nconst hexp: f64 = 0x1p-4;\n", &perr);
+    defer parser.freeCanonMap(gpa, &sci_map);
+    try std.testing.expectEqualStrings("const _ : f64 = 1e-5 ;", sci_map.get("sci.eps").?);
+    try std.testing.expectEqualStrings("const _ : f64 = 0x1p-4 ;", sci_map.get("sci.hexp").?);
+}
+
+test "Zig pair hash-movement properties (rename, body, ws, param, field)" {
+    const gpa = std.testing.allocator;
+    var host_fs = fsys.HostFS.init(std.testing.io);
+    const fs = host_fs.fs();
+
+    // 1. Rename only: both hashes equal
+    var ren_a = try parseSingleTestAtom(gpa, fs, "zig/pair_rename_a.zig");
+    defer ren_a.deinit(gpa);
+    var ren_b = try parseSingleTestAtom(gpa, fs, "zig/pair_rename_b.zig");
+    defer ren_b.deinit(gpa);
+    try std.testing.expect(std.mem.endsWith(u8, ren_a.name, ".fn_a"));
+    try std.testing.expect(std.mem.endsWith(u8, ren_b.name, ".fn_a_renamed"));
+    try std.testing.expectEqual(ren_a.hash, ren_b.hash);
+    try std.testing.expectEqual(ren_a.sig_hash, ren_b.sig_hash);
+
+    // 2. Body edit: hash differs, sig_hash equal
+    var body_a = try parseSingleTestAtom(gpa, fs, "zig/pair_body_a.zig");
+    defer body_a.deinit(gpa);
+    var body_b = try parseSingleTestAtom(gpa, fs, "zig/pair_body_b.zig");
+    defer body_b.deinit(gpa);
+    try std.testing.expect(!std.mem.eql(u8, &body_a.hash, &body_b.hash));
+    try std.testing.expectEqual(body_a.sig_hash, body_b.sig_hash);
+
+    // 3. Whitespace/comment-only: both equal
+    var ws_a = try parseSingleTestAtom(gpa, fs, "zig/pair_ws_a.zig");
+    defer ws_a.deinit(gpa);
+    var ws_b = try parseSingleTestAtom(gpa, fs, "zig/pair_ws_b.zig");
+    defer ws_b.deinit(gpa);
+    try std.testing.expectEqual(ws_a.hash, ws_b.hash);
+    try std.testing.expectEqual(ws_a.sig_hash, ws_b.sig_hash);
+
+    // 4. Parameter edit: both differ
+    var param_a = try parseSingleTestAtom(gpa, fs, "zig/pair_param_a.zig");
+    defer param_a.deinit(gpa);
+    var param_b = try parseSingleTestAtom(gpa, fs, "zig/pair_param_b.zig");
+    defer param_b.deinit(gpa);
+    try std.testing.expect(!std.mem.eql(u8, &param_a.hash, &param_b.hash));
+    try std.testing.expect(!std.mem.eql(u8, &param_a.sig_hash, &param_b.sig_hash));
+
+    // 5. Field reorder: hash differs
+    var field_a = try parseSingleTestAtom(gpa, fs, "zig/pair_field_a.zig");
+    defer field_a.deinit(gpa);
+    var field_b = try parseSingleTestAtom(gpa, fs, "zig/pair_field_b.zig");
+    defer field_b.deinit(gpa);
+    try std.testing.expect(!std.mem.eql(u8, &field_a.hash, &field_b.hash));
+}
+
+test "Zig refusals (anon_ret.zig offset 14) and usingnamespace ignore" {
+    const gpa = std.testing.allocator;
+    var host_fs = fsys.HostFS.init(std.testing.io);
+    const fs = host_fs.fs();
+
+    const src = try fs.readFile(gpa, "testdata/corpus/refuse/anon_ret.zig", store.MaxFileReadBytes);
+    defer gpa.free(src);
+
+    var perr: ?parser.ParseErrorInfo = null;
+    try std.testing.expectError(
+        error.ParseFailed,
+        parser.parseFile(gpa, "anon_ret.zig", src, null, &perr),
+    );
+    try std.testing.expect(perr != null);
+    try std.testing.expectEqualStrings("parse_unsupported", perr.?.code);
+    try std.testing.expectEqual(@as(usize, 14), perr.?.offset);
+
+    const atoms = try parser.parseFile(
+        gpa,
+        "legacy.zig",
+        "pub usingnamespace @import(\"other.zig\");\npub fn kept() void {}\n",
+        null,
+        &perr,
+    );
+    defer parser.freeAtoms(gpa, atoms);
+    try std.testing.expectEqual(@as(usize, 1), atoms.len);
+    try std.testing.expectEqualStrings("legacy.kept", atoms[0].name);
+}
+
+test "CLI parse-corpus on Zig files" {
+    const gpa = std.testing.allocator;
+    var host_fs = fsys.HostFS.init(std.testing.io);
+    const fs = host_fs.fs();
+    const sample_src = try fs.readFile(gpa, "testdata/corpus/zig/sample.zig", store.MaxFileReadBytes);
+    defer gpa.free(sample_src);
+
+    var h = try TestHarness.init(gpa);
+    defer h.deinit();
+    const mfs = h.mem.fs();
+    try mfs.writeFileSafe(gpa, "/corpus/zig/sample.zig", sample_src);
+
+    const res = try h.runCmd(&.{ "parse-corpus", "/corpus" });
+    defer gpa.free(res.out);
+    try std.testing.expectEqual(@as(u8, 0), res.rc);
+
+    var line_count: usize = 0;
+    var it = std.mem.splitScalar(u8, std.mem.trimEnd(u8, res.out, "\n"), '\n');
+    while (it.next()) |line| {
+        if (line.len == 0) continue;
+        line_count += 1;
+        try std.testing.expect(std.mem.startsWith(u8, line, "zig/sample.zig\t"));
+    }
+    try std.testing.expectEqual(@as(usize, 6), line_count);
 }
