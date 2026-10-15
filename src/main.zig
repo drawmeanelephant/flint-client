@@ -1248,6 +1248,15 @@ test "init layout and refusals" {
         try std.testing.expectEqualStrings("flint: refuse src_missing\n", res.out);
     }
 
+    // 4b. A --src that exists but is a file -> refuse src_missing.
+    try mfs.writeFileSafe(gpa, "/host/srcfile", "not a dir\n");
+    {
+        const res = try h.runCmd(&.{ "init", "--name=w4", "--src=/host/srcfile" });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 1), res.rc);
+        try std.testing.expectEqualStrings("flint: refuse src_missing\n", res.out);
+    }
+
     // 5. Invalid workspace name -> refuse usage (exit 2).
     {
         const res = try h.runCmd(&.{ "init", "--name=Bad_Name", "--src=/host/src" });
@@ -1575,6 +1584,86 @@ test "stage fold rules and status" {
         defer gpa.free(res.out);
         try std.testing.expectEqual(@as(u8, 0), res.rc);
         try std.testing.expectEqualStrings("flint: add files=1 new=0 modified=0 deleted=6 unchanged=2\n", res.out);
+    }
+}
+
+fn memRemoveDirRec(h: *TestHarness, path: []const u8) void {
+    if (h.mem.dirs.fetchRemove(path)) |kv| {
+        h.allocator.free(kv.key);
+    }
+}
+
+test "add reports missing files for vanished src and dir args" {
+    const gpa = std.testing.allocator;
+    var host_fs = fsys.HostFS.init(std.testing.io);
+    const hfs = host_fs.fs();
+    const sample_go = try hfs.readFile(gpa, "testdata/corpus/go/sample.go", store.MaxFileReadBytes);
+    defer gpa.free(sample_go);
+
+    var h = try TestHarness.init(gpa);
+    defer h.deinit();
+    const mfs = h.mem.fs();
+    try mfs.writeFileSafe(gpa, "/host/src/go/sample.go", sample_go);
+    try mfs.writeFileSafe(gpa, "/host/src/other/x.go", "package p\n\nfunc G() int { return 1 }\n");
+
+    {
+        const res = try h.runCmd(&.{ "init", "--name=w", "--src=/host/src" });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+    }
+    {
+        const res = try h.runCmd(&.{"add"});
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+        try std.testing.expectEqualStrings("flint: add files=2 new=5 modified=0 deleted=0 unchanged=0\n", res.out);
+    }
+    // Keep the atoms tracked but start each scenario from an empty stage.
+    try mfs.remove(gpa, "/host/FLINT/ws/w/STAGE.jsonl");
+
+    // 1. A dir arg whose directory vanished stages deletes for tracked files
+    // under it (spec: "add reports the missing files").
+    try mfs.remove(gpa, "/host/src/other/x.go");
+    memRemoveDirRec(h, "/host/src/other");
+    {
+        const res = try h.runCmd(&.{ "add", "/host/src/other" });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+        try std.testing.expectEqualStrings("flint: add files=0 new=0 modified=0 deleted=1 unchanged=0\n", res.out);
+    }
+    {
+        const stage = try store.loadWorkspaceStage(gpa, mfs, h.root, "w");
+        defer store.freeOps(gpa, stage);
+        try std.testing.expectEqual(@as(usize, 1), stage.len);
+        try std.testing.expectEqualStrings("delete", stage[0].type);
+    }
+    try mfs.remove(gpa, "/host/FLINT/ws/w/STAGE.jsonl");
+
+    // 2. Bare `add` with the whole src root gone stages deletes for every
+    // tracked file rather than printing files=0.
+    try mfs.remove(gpa, "/host/src/go/sample.go");
+    memRemoveDirRec(h, "/host/src/go");
+    memRemoveDirRec(h, "/host/src");
+    {
+        const res = try h.runCmd(&.{"add"});
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+        try std.testing.expectEqualStrings("flint: add files=0 new=0 modified=0 deleted=4 unchanged=0\n", res.out);
+    }
+    try mfs.remove(gpa, "/host/FLINT/ws/w/STAGE.jsonl");
+
+    // 3. An explicit arg that matches nothing on disk and nothing tracked
+    // refuses src_missing; a typo'd path is not silently swallowed.
+    {
+        const res = try h.runCmd(&.{ "add", "/host/src/nothere" });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 1), res.rc);
+        try std.testing.expectEqualStrings("flint: refuse src_missing /host/src/nothere\n", res.out);
+    }
+    {
+        const res = try h.runCmd(&.{ "add", "/host/src/nope.txt" });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 1), res.rc);
+        try std.testing.expectEqualStrings("flint: refuse src_missing /host/src/nope.txt\n", res.out);
     }
 }
 

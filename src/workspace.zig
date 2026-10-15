@@ -100,7 +100,7 @@ pub fn cmdInit(
 
     const src_dir = try fsys.cleanPath(allocator, raw_src);
     defer allocator.free(src_dir);
-    if (!fs.exists(allocator, src_dir)) {
+    if (!fs.isDir(allocator, src_dir)) {
         return fsys.refuse("src_missing", "");
     }
 
@@ -349,28 +349,54 @@ pub fn cmdAdd(
             try targets.append(allocator, .{ .rel_prefix = rel, .is_dir = true });
             try walkSourceFiles(allocator, fs, ws.src, p, entries, &disk_files_map);
             continue;
-        } else |_| {}
-
-        if (parser.forPath(rel) == null) {
-            continue;
-        }
-        if (fs.exists(allocator, p)) {
-            try targets.append(allocator, .{ .rel_prefix = rel, .is_dir = false });
-            if (!disk_files_map.contains(rel)) {
-                const rel_dup = try allocator.dupe(u8, rel);
-                errdefer allocator.free(rel_dup);
-                try disk_files_map.put(rel_dup, {});
+        } else |list_err| {
+            if (fs.isDir(allocator, p)) {
+                // A real directory that cannot be enumerated must not degrade
+                // to a silent skip, which would mis-report its tracked files.
+                return list_err;
             }
-            continue;
         }
-        // A disappeared single file that was tracked in ATOMS.jsonl deletes its Atoms.
-        if (atoms_by_file.get(rel)) |list| {
-            if (list.items.len > 0) {
+
+        if (parser.forPath(rel) != null) {
+            if (fs.exists(allocator, p)) {
                 try targets.append(allocator, .{ .rel_prefix = rel, .is_dir = false });
+                if (!disk_files_map.contains(rel)) {
+                    const rel_dup = try allocator.dupe(u8, rel);
+                    errdefer allocator.free(rel_dup);
+                    try disk_files_map.put(rel_dup, {});
+                }
                 continue;
             }
+            // A disappeared single file that was tracked in ATOMS.jsonl deletes its Atoms.
+            if (atoms_by_file.get(rel)) |list| {
+                if (list.items.len > 0) {
+                    try targets.append(allocator, .{ .rel_prefix = rel, .is_dir = false });
+                    continue;
+                }
+            }
+            return fsys.refuse("src_missing", p);
         }
-        return fsys.refuse("src_missing", p);
+
+        if (fs.exists(allocator, p)) continue;
+
+        // The path does not exist. If tracked files live under it as a
+        // directory, they are missing: treat it as a directory target so
+        // their Atoms stage deletes (spec §2.1: "add reports the missing
+        // files"). Otherwise an arg that matches nothing refuses src_missing
+        // rather than silently no-op'ing.
+        const dir_target = AddTarget{ .rel_prefix = rel, .is_dir = true };
+        var tracked_under = false;
+        var ait = atoms_by_file.keyIterator();
+        while (ait.next()) |k| {
+            if (inTargets(k.*, &.{dir_target})) {
+                tracked_under = true;
+                break;
+            }
+        }
+        if (!tracked_under) {
+            return fsys.refuse("src_missing", p);
+        }
+        try targets.append(allocator, dir_target);
     }
 
     var disk_files: std.ArrayList([]const u8) = .empty;
