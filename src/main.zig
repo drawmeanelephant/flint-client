@@ -3088,6 +3088,61 @@ test "M106e remote verbs: push, clone, pull, fork_needed, tampered sig_invalid, 
     }
 }
 
+test "M106e stream_missing refusal on clone names remote streams" {
+    const gpa = std.testing.allocator;
+
+    var srv_mem = try fsys.MemFS.init(gpa);
+    defer srv_mem.deinit();
+    const srv_fs = srv_mem.fs();
+    try srv_fs.mkdir(gpa, "/srv/FLINT/streams");
+
+    var server = sync.InProcServer{
+        .allocator = gpa,
+        .fs = srv_fs,
+        .store_root = "/srv/FLINT",
+    };
+
+    var ha = try TestHarness.init(gpa);
+    defer ha.deinit();
+    ha.env_sign_key = rfc8032_seed_hex;
+    ha.sync_dial = sync.InProcServer.dial;
+    ha.sync_dial_ctx = &server;
+    const fsa = ha.mem.fs();
+
+    try fsa.writeFileSafe(gpa, "/host/SRCA/calc.go", "package calc\n\nfunc X() int {\n\treturn 1\n}\n");
+    for ([_][]const []const u8{
+        &.{ "init", "--name=a", "--src=/host/SRCA" },
+        &.{ "add", "/host/SRCA" },
+        &.{ "commit", "-m", "initial" },
+        &.{ "push", "--remote=tcp://127.0.0.1:4748" },
+    }) |cmd| {
+        const res = try ha.runCmd(cmd);
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+    }
+
+    // Cloning a stream the remote does not have refuses `stream_missing` and
+    // names the remote's available streams via `list` (#36).
+    var hb = try TestHarness.init(gpa);
+    defer hb.deinit();
+    hb.sync_dial = sync.InProcServer.dial;
+    hb.sync_dial_ctx = &server;
+
+    const res = try hb.runCmd(&.{
+        "clone",
+        "tcp://127.0.0.1:4748",
+        "--stream=nope",
+        "--name=b",
+        "--src=/host/SRCB",
+    });
+    defer gpa.free(res.out);
+    try std.testing.expectEqual(@as(u8, 1), res.rc);
+    try std.testing.expectEqualStrings(
+        "flint: refuse stream_missing nope (available streams: main)\n",
+        res.out,
+    );
+}
+
 test "M106e auth challenge, allow-author, forked stream clone/push, and loopback TCP" {
     const gpa = std.testing.allocator;
 

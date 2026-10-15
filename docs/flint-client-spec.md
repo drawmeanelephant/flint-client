@@ -63,6 +63,8 @@ refuse `remote_missing`. Optional shared-secret authentication (`--auth-key=<fil
 `FLINT-SYNC/1` (`proto_version`, `auth_required`, `auth_failed`, `author_not_allowed`,
 `change_too_large`, `stale_head`, `stream_exists`, `stream_missing`, `change_missing`,
 `change_malformed`, `sig_invalid`, etc.) print directly as `flint: refuse <name>`.
+On a remote `stream_missing` refusal the client additionally issues `list` and
+annotates the refusal detail with `(available streams: <name>, …)`.
 Local failures inside a sync verb — dial errors, transport drops, and other
 non-refusal errors — print `flint: error <verb> <remote>: <reason>` with the
 resolved remote URL, so a failure surfaced through `REMOTE.json` or
