@@ -2842,6 +2842,121 @@ test "conflicting merge writes MERGE.json and leaves history and ATOMS.jsonl byt
     try std.testing.expectEqualStrings("concurrent_modify", conflicts[0].object.get("type").?.string);
 }
 
+test "commit during a conflicted merge records merged and clears MERGE.json (#44)" {
+    const gpa = std.testing.allocator;
+    var h = try TestHarness.init(gpa);
+    defer h.deinit();
+    h.env_sign_key = rfc8032_seed_hex;
+    const mfs = h.mem.fs();
+
+    const base_src = "package calc\n\nfunc X() int {\n\treturn 1\n}\n\nfunc Y() int {\n\treturn 2\n}\n";
+    try mfs.writeFileSafe(gpa, "/host/SRCA/calc.go", base_src);
+    try mfs.writeFileSafe(gpa, "/host/SRCB/calc.go", base_src);
+
+    for ([_][]const []const u8{
+        &.{ "init", "--name=a", "--src=/host/SRCA" },
+        &.{ "add", "/host/SRCA" },
+        &.{ "commit", "-m", "base" },
+        &.{ "fork", "main", "feature" },
+        &.{ "init", "--name=b", "--src=/host/SRCB", "--stream=feature" },
+    }) |cmd| {
+        const res = try h.runCmd(cmd);
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+    }
+
+    try mfs.writeFileSafe(
+        gpa,
+        "/host/SRCB/calc.go",
+        "package calc\n\nfunc X() int {\n\treturn 10\n}\n\nfunc Y() int {\n\treturn 2\n}\n",
+    );
+    h.now += 5;
+    for ([_][]const []const u8{
+        &.{ "add", "/host/SRCB" },
+        &.{ "commit", "--ws=b", "-m", "feat" },
+    }) |cmd| {
+        const res = try h.runCmd(cmd);
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+    }
+
+    try mfs.writeFileSafe(
+        gpa,
+        "/host/SRCA/calc.go",
+        "package calc\n\nfunc X() int {\n\treturn 99\n}\n\nfunc Y() int {\n\treturn 2\n}\n",
+    );
+    h.now += 5;
+    for ([_][]const []const u8{
+        &.{ "add", "/host/SRCA" },
+        &.{ "commit", "--ws=a", "-m", "main" },
+    }) |cmd| {
+        const res = try h.runCmd(cmd);
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+    }
+
+    {
+        const res = try h.runCmd(&.{ "merge", "feature" });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 2), res.rc);
+        try std.testing.expect(std.mem.indexOf(u8, res.out, "flint: merge conflicts=1\n") != null);
+    }
+
+    const merge_path = try store.workspaceMergePath(gpa, h.root, "a");
+    defer gpa.free(merge_path);
+    try std.testing.expect(mfs.exists(gpa, merge_path));
+
+    var idx = try store.loadStoreIndex(gpa, mfs, h.root);
+    defer idx.deinit();
+    const feature_head = blk: {
+        const feature_id = idx.streamByName("feature").?.id;
+        const fl = try store.loadStream(gpa, mfs, h.root, feature_id);
+        defer fl.deinit(gpa);
+        break :blk try gpa.dupe(u8, fl.stream.head.?);
+    };
+    defer gpa.free(feature_head);
+
+    // Resolve the conflict in src, stage it, commit — this completes the merge.
+    try mfs.writeFileSafe(
+        gpa,
+        "/host/SRCA/calc.go",
+        "package calc\n\nfunc X() int {\n\treturn 5\n}\n\nfunc Y() int {\n\treturn 2\n}\n",
+    );
+    h.now += 5;
+    for ([_][]const []const u8{
+        &.{ "add", "/host/SRCA" },
+        &.{ "commit", "--ws=a", "-m", "resolve" },
+    }) |cmd| {
+        const res = try h.runCmd(cmd);
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+    }
+
+    try std.testing.expect(!mfs.exists(gpa, merge_path));
+
+    // The resolving Change records merged=<feature head>.
+    {
+        var idx2 = try store.loadStoreIndex(gpa, mfs, h.root);
+        defer idx2.deinit();
+        const main_id = idx2.streamByName("main").?.id;
+        const ml = try store.loadStream(gpa, mfs, h.root, main_id);
+        defer ml.deinit(gpa);
+        for (ml.changes) |c| {
+            if (std.mem.eql(u8, c.id, ml.stream.head.?)) {
+                try std.testing.expectEqualStrings(feature_head, c.merged.?);
+                break;
+            }
+        } else return error.TestUnexpectedResult;
+    }
+
+    {
+        const res = try h.runCmd(&.{ "merge", "feature" });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+        try std.testing.expectEqualStrings("flint: merge up to date\n", res.out);
+    }
+}
+
 test "M106e remote verbs: push, clone, pull, fork_needed, tampered sig_invalid, and REMOTE.json" {
     const gpa = std.testing.allocator;
 
@@ -3071,12 +3186,15 @@ test "M106e remote verbs: push, clone, pull, fork_needed, tampered sig_invalid, 
         try std.testing.expectEqual(@as(u8, 0), res.rc);
     }
 
-    // Client B `push` refuses `stale_head`.
+    // Client B `push` refuses `stale_head` with a recovery hint in the detail.
     {
         const res = try hb.runCmd(&.{"push"});
         defer gpa.free(res.out);
         try std.testing.expectEqual(@as(u8, 1), res.rc);
-        try std.testing.expectEqualStrings("flint: refuse stale_head\n", res.out);
+        try std.testing.expectEqualStrings(
+            "flint: refuse stale_head remote head advanced; pull to catch up (diverged: fork <stream> <aside>, pull --reset, merge <aside>, push)\n",
+            res.out,
+        );
     }
 
     // Client B `pull` refuses `fork_needed` because local and remote heads have diverged.
@@ -3141,6 +3259,123 @@ test "M106e stream_missing refusal on clone names remote streams" {
         "flint: refuse stream_missing nope (available streams: main)\n",
         res.out,
     );
+}
+
+test "push refusals carry hints: stale_head names the recovery, stream_exists lists remote streams (#45, #46)" {
+    const gpa = std.testing.allocator;
+
+    var srv_mem = try fsys.MemFS.init(gpa);
+    defer srv_mem.deinit();
+    const srv_fs = srv_mem.fs();
+    try srv_fs.mkdir(gpa, "/srv/FLINT/streams");
+
+    var server = sync.InProcServer{
+        .allocator = gpa,
+        .fs = srv_fs,
+        .store_root = "/srv/FLINT",
+    };
+
+    var ha = try TestHarness.init(gpa);
+    defer ha.deinit();
+    ha.env_sign_key = rfc8032_seed_hex;
+    ha.sync_dial = sync.InProcServer.dial;
+    ha.sync_dial_ctx = &server;
+    const fsa = ha.mem.fs();
+
+    try fsa.writeFileSafe(gpa, "/host/SRCA/calc.go", "package calc\n\nfunc X() int {\n\treturn 1\n}\n");
+    for ([_][]const []const u8{
+        &.{ "init", "--name=a", "--src=/host/SRCA" },
+        &.{ "add", "/host/SRCA" },
+        &.{ "commit", "-m", "c1" },
+        &.{ "push", "--remote=tcp://127.0.0.1:4748" },
+    }) |cmd| {
+        const res = try ha.runCmd(cmd);
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+    }
+
+    // B clones, commits, pushes — the remote head advances past A's local head.
+    var hb = try TestHarness.init(gpa);
+    defer hb.deinit();
+    hb.env_sign_key = rfc8032_seed_hex;
+    hb.sync_dial = sync.InProcServer.dial;
+    hb.sync_dial_ctx = &server;
+    const fsb = hb.mem.fs();
+
+    {
+        const res = try hb.runCmd(&.{
+            "clone",
+            "tcp://127.0.0.1:4748",
+            "--stream=main",
+            "--name=b",
+            "--src=/host/SRCB",
+        });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+    }
+    try fsb.writeFileSafe(gpa, "/host/SRCB/calc.go", "package calc\n\nfunc X() int {\n\treturn 2\n}\n");
+    for ([_][]const []const u8{
+        &.{ "add", "/host/SRCB" },
+        &.{ "commit", "--ws=b", "-m", "b1" },
+        &.{ "push", "--ws=b" },
+    }) |cmd| {
+        const res = try hb.runCmd(cmd);
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+    }
+
+    // A commits without pulling, pushes — divergent push refuses stale_head
+    // with a detail naming the recovery (scenario 130-stale-head-hint).
+    try fsa.writeFileSafe(gpa, "/host/SRCA/calc.go", "package calc\n\nfunc X() int {\n\treturn 9\n}\n");
+    {
+        const res = try ha.runCmd(&.{ "add", "/host/SRCA" });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+    }
+    {
+        const res = try ha.runCmd(&.{ "commit", "-m", "a2" });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+    }
+    {
+        const res = try ha.runCmd(&.{"push"});
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 1), res.rc);
+        try std.testing.expectEqualStrings(
+            "flint: refuse stale_head remote head advanced; pull to catch up (diverged: fork <stream> <aside>, pull --reset, merge <aside>, push)\n",
+            res.out,
+        );
+    }
+
+    // A fresh client pushes its own 'main' (different stream id) — the remote
+    // refusal names the colliding stream (scenario 140-push-stream-exists-hint).
+    var hc = try TestHarness.init(gpa);
+    defer hc.deinit();
+    hc.env_sign_key = rfc8032_seed_hex;
+    hc.rng_seed = 77; // different UUID stream → C's 'main' gets a distinct stream id
+    hc.sync_dial = sync.InProcServer.dial;
+    hc.sync_dial_ctx = &server;
+    const fsc = hc.mem.fs();
+
+    try fsc.writeFileSafe(gpa, "/host/SRCC/calc.go", "package calc\n\nfunc Y() int {\n\treturn 1\n}\n");
+    for ([_][]const []const u8{
+        &.{ "init", "--name=c", "--src=/host/SRCC" },
+        &.{ "add", "/host/SRCC" },
+        &.{ "commit", "-m", "c1" },
+    }) |cmd| {
+        const res = try hc.runCmd(cmd);
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+    }
+    {
+        const res = try hc.runCmd(&.{ "push", "--remote=tcp://127.0.0.1:4748" });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 1), res.rc);
+        try std.testing.expectEqualStrings(
+            "flint: refuse stream_exists main (available streams: main)\n",
+            res.out,
+        );
+    }
 }
 
 test "M106e auth challenge, allow-author, forked stream clone/push, and loopback TCP" {

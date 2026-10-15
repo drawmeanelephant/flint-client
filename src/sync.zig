@@ -21,6 +21,11 @@ pub const MaxStreams: usize = 256;
 pub const MaxWorkspaces: usize = 256;
 pub const MaxChangeBytes: usize = 1024 * 1024;
 
+/// Detail attached to `stale_head` refusals so a divergent push still points
+/// at the recovery journey instead of failing bare.
+pub const stale_head_recovery_hint =
+    "remote head advanced; pull to catch up (diverged: fork <stream> <aside>, pull --reset, merge <aside>, push)";
+
 fn readStreamRawLines(allocator: Allocator, fs: FS, root: []const u8, stream_id: []const u8) ![][]u8 {
     const p = try store.streamLogPath(allocator, root, stream_id);
     defer allocator.free(p);
@@ -374,25 +379,33 @@ pub const SyncClient = struct {
                 .string => |s| s,
                 else => "wire_error",
             } else "wire_error";
-            if (std.mem.eql(u8, refuse_name, "stream_missing") and !self.in_list_hint) {
-                const detail: []const u8 = if (obj.get("detail")) |dv| switch (dv) {
-                    .string => |s| s,
-                    else => "",
-                } else "";
-                return self.refuseStreamMissing(detail);
+            if (!self.in_list_hint) {
+                if (std.mem.eql(u8, refuse_name, "stream_missing") or
+                    std.mem.eql(u8, refuse_name, "stream_exists"))
+                {
+                    const detail: []const u8 = if (obj.get("detail")) |dv| switch (dv) {
+                        .string => |s| s,
+                        else => "",
+                    } else "";
+                    return self.refuseWithRemoteStreams(refuse_name, detail);
+                }
+                if (std.mem.eql(u8, refuse_name, "stale_head")) {
+                    return fsys.refuse(refuse_name, stale_head_recovery_hint);
+                }
             }
             return fsys.refuse(refuse_name, "");
         }
         return obj;
     }
 
-    /// Re-refuses `stream_missing` naming the streams the remote actually has
-    /// (via `list`), so a bare refusal still tells the user what to clone/pull.
-    /// Falls back to the unadorned detail when `list` fails or the buffer fills.
-    fn refuseStreamMissing(self: *SyncClient, detail: []const u8) error{Refuse} {
+    /// Re-refuses `stream_missing`/`stream_exists` naming the streams the
+    /// remote actually has (via `list`), so a bare refusal still tells the
+    /// user what to clone/pull or which name collided. Falls back to the
+    /// unadorned detail when `list` fails or the buffer fills.
+    fn refuseWithRemoteStreams(self: *SyncClient, code: []const u8, detail: []const u8) error{Refuse} {
         self.in_list_hint = true;
         defer self.in_list_hint = false;
-        const streams = self.list() catch return fsys.refuse("stream_missing", detail);
+        const streams = self.list() catch return fsys.refuse(code, detail);
         defer {
             for (streams) |s| s.deinit(self.allocator);
             self.allocator.free(streams);
@@ -400,15 +413,15 @@ pub const SyncClient = struct {
 
         var buf: std.ArrayList(u8) = .empty;
         defer buf.deinit(self.allocator);
-        buf.appendSlice(self.allocator, detail) catch return fsys.refuse("stream_missing", detail);
+        buf.appendSlice(self.allocator, detail) catch return fsys.refuse(code, detail);
         if (detail.len > 0) buf.appendSlice(self.allocator, " ") catch {};
-        buf.appendSlice(self.allocator, "(available streams:") catch return fsys.refuse("stream_missing", detail);
+        buf.appendSlice(self.allocator, "(available streams:") catch return fsys.refuse(code, detail);
         for (streams) |s| {
             buf.append(self.allocator, ' ') catch break;
             buf.appendSlice(self.allocator, s.name) catch break;
         }
         buf.append(self.allocator, ')') catch {};
-        return fsys.refuse("stream_missing", buf.items);
+        return fsys.refuse(code, buf.items);
     }
 
     pub fn list(self: *SyncClient) ![]store.Stream {
@@ -1261,13 +1274,13 @@ fn pushSingleStream(
         const exp = loaded.changes[last_idx].parent;
         const h = try client.append(st_id, exp, raw_lines[last_idx .. last_idx + 1]);
         allocator.free(h);
-        return fsys.refuse("stale_head", "");
+        return fsys.refuse("stale_head", stale_head_recovery_hint);
     }
 
     const s_idx = start_idx.?;
     if (s_idx >= raw_lines.len) {
         // Local head is behind remote head!
-        return fsys.refuse("stale_head", "");
+        return fsys.refuse("stale_head", stale_head_recovery_hint);
     }
 
     var cur_expected: ?[]u8 = if (expected_head) |eh| try allocator.dupe(u8, eh) else null;
