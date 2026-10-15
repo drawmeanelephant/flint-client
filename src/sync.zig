@@ -842,6 +842,7 @@ pub fn cmdClone(
 
     const remote_url = try resolveRemoteUrl(allocator, fs, root, remote_flag, env_remote, null);
     defer allocator.free(remote_url);
+    fsys.setErrContext("clone", remote_url);
 
     var auth_key = try loadAuthKey(allocator, fs, auth_key_flag, env_auth_key);
     defer if (auth_key) |*k| @memset(k, 0);
@@ -1287,6 +1288,7 @@ pub fn cmdPush(
     const target = try resolveStreamAndWorkspace(allocator, fs, &idx, stream_flag, ws_flag);
     const remote_url = try resolveRemoteUrl(allocator, fs, root, remote_flag, env_remote, target.ws_name);
     defer allocator.free(remote_url);
+    fsys.setErrContext("push", remote_url);
 
     var auth_key = try loadAuthKey(allocator, fs, auth_key_flag, env_auth_key);
     defer if (auth_key) |*k| @memset(k, 0);
@@ -1397,6 +1399,7 @@ pub fn cmdPull(
     const target = try resolveStreamAndWorkspace(allocator, fs, &idx, stream_flag, ws_flag);
     const remote_url = try resolveRemoteUrl(allocator, fs, root, remote_flag, env_remote, target.ws_name);
     defer allocator.free(remote_url);
+    fsys.setErrContext("pull", remote_url);
 
     var auth_key = try loadAuthKey(allocator, fs, auth_key_flag, env_auth_key);
     defer if (auth_key) |*k| @memset(k, 0);

@@ -45,6 +45,40 @@ pub fn writeRefuseLine(w: *Io.Writer) void {
     }
 }
 
+/// Context attached to non-refusal errors so `handleErr` can say which verb
+/// and remote URL failed instead of printing a bare error name. The sync
+/// verbs set it once the remote is resolved; `runWithContext` clears it
+/// before dispatch so a stale context never leaks into the next command.
+pub const ErrContext = struct {
+    verb_buf: [16]u8 = undefined,
+    verb_len: usize = 0,
+    remote_buf: [512]u8 = undefined,
+    remote_len: usize = 0,
+
+    pub fn verb(self: *const ErrContext) []const u8 {
+        return self.verb_buf[0..self.verb_len];
+    }
+
+    pub fn remote(self: *const ErrContext) []const u8 {
+        return self.remote_buf[0..self.remote_len];
+    }
+};
+
+pub threadlocal var err_context: ?ErrContext = null;
+
+pub fn setErrContext(verb_str: []const u8, remote_str: []const u8) void {
+    var ctx: ErrContext = .{};
+    ctx.verb_len = @min(verb_str.len, ctx.verb_buf.len);
+    @memcpy(ctx.verb_buf[0..ctx.verb_len], verb_str[0..ctx.verb_len]);
+    ctx.remote_len = @min(remote_str.len, ctx.remote_buf.len);
+    @memcpy(ctx.remote_buf[0..ctx.remote_len], remote_str[0..ctx.remote_len]);
+    err_context = ctx;
+}
+
+pub fn clearErrContext() void {
+    err_context = null;
+}
+
 pub const DirEntry = struct {
     name: []const u8,
     is_dir: bool,
