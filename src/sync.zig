@@ -324,6 +324,7 @@ pub const SyncClient = struct {
     allocator: Allocator,
     transport: Transport,
     seq: u64 = 0,
+    in_list_hint: bool = false,
 
     pub fn init(allocator: Allocator, transport: Transport) SyncClient {
         return .{
@@ -351,7 +352,7 @@ pub const SyncClient = struct {
         return parsed;
     }
 
-    fn checkResponseOk(parsed: std.json.Value, expected_seq: u64) !std.json.ObjectMap {
+    fn checkResponseOk(self: *SyncClient, parsed: std.json.Value, expected_seq: u64) !std.json.ObjectMap {
         const obj = switch (parsed) {
             .object => |o| o,
             else => return fsys.refuse("change_malformed", ""),
@@ -373,9 +374,68 @@ pub const SyncClient = struct {
                 .string => |s| s,
                 else => "wire_error",
             } else "wire_error";
+            if (std.mem.eql(u8, refuse_name, "stream_missing") and !self.in_list_hint) {
+                const detail: []const u8 = if (obj.get("detail")) |dv| switch (dv) {
+                    .string => |s| s,
+                    else => "",
+                } else "";
+                return self.refuseStreamMissing(detail);
+            }
             return fsys.refuse(refuse_name, "");
         }
         return obj;
+    }
+
+    /// Re-refuses `stream_missing` naming the streams the remote actually has
+    /// (via `list`), so a bare refusal still tells the user what to clone/pull.
+    /// Falls back to the unadorned detail when `list` fails or the buffer fills.
+    fn refuseStreamMissing(self: *SyncClient, detail: []const u8) error{Refuse} {
+        self.in_list_hint = true;
+        defer self.in_list_hint = false;
+        const streams = self.list() catch return fsys.refuse("stream_missing", detail);
+        defer {
+            for (streams) |s| s.deinit(self.allocator);
+            self.allocator.free(streams);
+        }
+
+        var buf: std.ArrayList(u8) = .empty;
+        defer buf.deinit(self.allocator);
+        buf.appendSlice(self.allocator, detail) catch return fsys.refuse("stream_missing", detail);
+        if (detail.len > 0) buf.appendSlice(self.allocator, " ") catch {};
+        buf.appendSlice(self.allocator, "(available streams:") catch return fsys.refuse("stream_missing", detail);
+        for (streams) |s| {
+            buf.append(self.allocator, ' ') catch break;
+            buf.appendSlice(self.allocator, s.name) catch break;
+        }
+        buf.append(self.allocator, ')') catch {};
+        return fsys.refuse("stream_missing", buf.items);
+    }
+
+    pub fn list(self: *SyncClient) ![]store.Stream {
+        const seq = self.nextSeq();
+        var req: std.ArrayList(u8) = .empty;
+        defer req.deinit(self.allocator);
+        try req.print(self.allocator, "{{\"op\":\"list\",\"seq\":{d}}}", .{seq});
+
+        var parsed = try self.sendAndParse(req.items);
+        defer parsed.deinit();
+        const obj = try self.checkResponseOk(parsed.value, seq);
+
+        const streams_val = obj.get("streams") orelse return fsys.refuse("change_malformed", "");
+        const streams_arr = switch (streams_val) {
+            .array => |a| a,
+            else => return fsys.refuse("change_malformed", ""),
+        };
+
+        var out: std.ArrayList(store.Stream) = .empty;
+        errdefer {
+            for (out.items) |s| s.deinit(self.allocator);
+            out.deinit(self.allocator);
+        }
+        for (streams_arr.items) |item| {
+            try out.append(self.allocator, try parseStreamValue(self.allocator, item));
+        }
+        return out.toOwnedSlice(self.allocator);
     }
 
     pub fn handshake(self: *SyncClient, auth_key: ?[32]u8) !void {
@@ -421,7 +481,7 @@ pub const SyncClient = struct {
                         try hello2.print(self.allocator, "{{\"op\":\"hello\",\"seq\":{d},\"proto\":\"{s}\"}}", .{ seq3, ProtoVersion });
                         var parsed2 = try self.sendAndParse(hello2.items);
                         defer parsed2.deinit();
-                        const obj2 = try checkResponseOk(parsed2.value, seq3);
+                        const obj2 = try self.checkResponseOk(parsed2.value, seq3);
                         const pval = obj2.get("proto") orelse return fsys.refuse("proto_version", "");
                         if (pval != .string or !std.mem.eql(u8, pval.string, ProtoVersion)) {
                             return fsys.refuse("proto_version", "");
@@ -433,7 +493,7 @@ pub const SyncClient = struct {
             return fsys.refuse(refuse_name, "");
         }
 
-        _ = try checkResponseOk(parsed.value, seq1);
+        _ = try self.checkResponseOk(parsed.value, seq1);
         const proto_val = obj.get("proto") orelse return fsys.refuse("proto_version", "");
         const proto_str = switch (proto_val) {
             .string => |s| s,
@@ -465,7 +525,7 @@ pub const SyncClient = struct {
 
         var parsed = try self.sendAndParse(req.items);
         defer parsed.deinit();
-        _ = try checkResponseOk(parsed.value, seq);
+        _ = try self.checkResponseOk(parsed.value, seq);
     }
 
     pub fn heads(self: *SyncClient) !std.StringHashMap(?[]u8) {
@@ -476,7 +536,7 @@ pub const SyncClient = struct {
 
         var parsed = try self.sendAndParse(req.items);
         defer parsed.deinit();
-        const obj = try checkResponseOk(parsed.value, seq);
+        const obj = try self.checkResponseOk(parsed.value, seq);
 
         const heads_val = obj.get("heads") orelse return fsys.refuse("change_malformed", "");
         const heads_obj = switch (heads_val) {
@@ -519,7 +579,7 @@ pub const SyncClient = struct {
 
         var parsed = try self.sendAndParse(req.items);
         defer parsed.deinit();
-        const obj = try checkResponseOk(parsed.value, seq);
+        const obj = try self.checkResponseOk(parsed.value, seq);
 
         const rec_val = obj.get("record") orelse return fsys.refuse("stream_malformed", "");
         return parseStreamValue(self.allocator, rec_val);
@@ -544,7 +604,7 @@ pub const SyncClient = struct {
 
         var parsed = try self.sendAndParse(req.items);
         defer parsed.deinit();
-        const obj = try checkResponseOk(parsed.value, seq);
+        const obj = try self.checkResponseOk(parsed.value, seq);
 
         const head: ?[]u8 = if (obj.get("head")) |hv| switch (hv) {
             .null => null,
@@ -599,7 +659,7 @@ pub const SyncClient = struct {
 
         var parsed = try self.sendAndParse(req.items);
         defer parsed.deinit();
-        _ = try checkResponseOk(parsed.value, seq);
+        _ = try self.checkResponseOk(parsed.value, seq);
     }
 
     pub fn append(
@@ -629,7 +689,7 @@ pub const SyncClient = struct {
 
         var parsed = try self.sendAndParse(req.items);
         defer parsed.deinit();
-        const obj = try checkResponseOk(parsed.value, seq);
+        const obj = try self.checkResponseOk(parsed.value, seq);
 
         const head_val = obj.get("head") orelse return fsys.refuse("change_malformed", "");
         return switch (head_val) {
