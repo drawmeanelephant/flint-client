@@ -22,6 +22,8 @@ versa.
   implementation's `user/go/flint/testdata/`. This is the acceptance suite
   for the port; the Go implementation in VirelaiOS stays the reference
   oracle.
+- `SPECREV` + `docs/spec-versioning.md` — the protocol-visible spec
+  revision and the pinning/tagging convention for downstream ports.
 
 ## Tracking
 
