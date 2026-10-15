@@ -96,6 +96,12 @@ pub fn cmdCommit(
         return fsys.refuse("store_too_large", "changes");
     }
 
+    // A commit during an in-progress merge (`MERGE.json` present) is the
+    // resolution: the Change records `merged = report.from` so the merged-in
+    // head becomes reachable, and MERGE.json is removed on success.
+    const merge_report = try store.loadWorkspaceMerge(allocator, fs, root, ws.name);
+    defer if (merge_report) |mr| mr.deinit(allocator);
+
     // ADR 0049: load the signing key BEFORE any write (including before
     // `loadStream`, which could roll forward a stale stream record) so a
     // missing or malformed secret leaves the store byte-identical.
@@ -118,7 +124,7 @@ pub fn cmdCommit(
         .author = "",
         .message = msg,
         .ops = stage,
-        .merged = null,
+        .merged = if (merge_report) |mr| mr.from else null,
         .sig = "",
     };
     defer {
@@ -141,11 +147,20 @@ pub fn cmdCommit(
     defer allocator.free(stage_path);
     try fs.remove(allocator, stage_path);
 
+    if (merge_report != null) {
+        const merge_path = try store.workspaceMergePath(allocator, root, ws.name);
+        defer allocator.free(merge_path);
+        try fs.remove(allocator, merge_path);
+    }
+
     const parent_str = c.parent orelse "none";
     try out.print(
         "flint: commit ok id={s} ops={d} parent={s}\n",
         .{ c.id, c.ops.len, parent_str },
     );
+    if (merge_report) |mr| {
+        try out.print("flint: merge completed merged={s}\n", .{mr.from});
+    }
 }
 
 fn firstMessageLine(msg: []const u8) []const u8 {

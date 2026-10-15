@@ -615,6 +615,47 @@ pub fn parseRemoteConfig(allocator: Allocator, data: []const u8) !store.RemoteCo
     return .{ .remote = remote, .stream = stream };
 }
 
+/// Parses the JSON document written to `ws/<name>/MERGE.json` by a
+/// conflicted `merge` (`into`, `from`, `ancestor`, `conflicts`).
+pub fn parseMergeReport(allocator: Allocator, data: []const u8) !store.MergeReport {
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, data, .{});
+    defer parsed.deinit();
+    if (parsed.value != .object) return error.InvalidJsonField;
+    const obj = parsed.value.object;
+
+    const into = try getOptStrDupe(allocator, obj, "into");
+    errdefer allocator.free(into);
+    const from = try getOptStrDupe(allocator, obj, "from");
+    errdefer allocator.free(from);
+    const ancestor = try getOptStrDupe(allocator, obj, "ancestor");
+    errdefer allocator.free(ancestor);
+
+    var conflicts: std.ArrayList(store.MergeConflict) = .empty;
+    errdefer {
+        for (conflicts.items) |c| c.deinit(allocator);
+        conflicts.deinit(allocator);
+    }
+    if (obj.get("conflicts")) |cv| {
+        const arr = switch (cv) {
+            .array => |a| a,
+            else => return error.InvalidJsonField,
+        };
+        for (arr.items) |item| {
+            const co = switch (item) {
+                .object => |o| o,
+                else => return error.InvalidJsonField,
+            };
+            const atom_id = try getOptStrDupe(allocator, co, "atom_id");
+            errdefer allocator.free(atom_id);
+            const name = try getOptStrDupe(allocator, co, "name");
+            errdefer allocator.free(name);
+            const t = try getOptStrDupe(allocator, co, "type");
+            try conflicts.append(allocator, .{ .atom_id = atom_id, .name = name, .type = t });
+        }
+    }
+    return .{ .into = into, .from = from, .ancestor = ancestor, .conflicts = try conflicts.toOwnedSlice(allocator) };
+}
+
 test "Go JSON HTML escaping and Change roundtrip" {
     const gpa = std.testing.allocator;
     var out: std.ArrayList(u8) = .empty;

@@ -986,6 +986,17 @@ pub fn loadWorkspaceRemote(allocator: Allocator, fs: FS, root: []const u8, ws_na
     return try json.parseRemoteConfig(allocator, raw);
 }
 
+/// LoadWorkspaceMerge reads `ws/<name>/MERGE.json` — the marker a conflicted
+/// `merge` leaves behind — or returns `null` when no merge is in progress.
+pub fn loadWorkspaceMerge(allocator: Allocator, fs: FS, root: []const u8, ws_name: []const u8) !?MergeReport {
+    const p = try workspaceMergePath(allocator, root, ws_name);
+    defer allocator.free(p);
+    if (!fs.exists(allocator, p)) return null;
+    const raw = try fs.readFile(allocator, p, MaxFileReadBytes);
+    defer allocator.free(raw);
+    return try json.parseMergeReport(allocator, raw);
+}
+
 /// CheckStaleHead re-reads the Stream record (rolling forward if the log moved)
 /// and refuses with `stale_head` if the head no longer equals `expected_head`.
 pub fn checkStaleHead(
