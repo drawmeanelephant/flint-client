@@ -202,12 +202,12 @@ fn currentPid() u32 {
 
 fn syncParentDir(io: Io, path: []const u8) void {
     const parent = dirName(path);
-    var dir = Io.Dir.openDir(.cwd(), io, parent, .{}) catch return;
-    defer dir.close(io);
-    const dir_file = Io.File{
-        .handle = dir.handle,
-        .flags = .{ .nonblocking = false },
-    };
+    const dir_file = Io.Dir.openFile(.cwd(), io, parent, .{
+        .mode = .read_only,
+        .allow_directory = true,
+        .path_only = false,
+    }) catch return;
+    defer dir_file.close(io);
     dir_file.sync(io) catch {};
 }
 

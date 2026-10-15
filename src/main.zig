@@ -10,6 +10,7 @@ pub const ed25519 = @import("ed25519.zig");
 pub const canon = @import("canon.zig");
 pub const parser = @import("parser/parser.zig");
 pub const render = @import("parser/render.zig");
+pub const workspace = @import("workspace.zig");
 
 /// Runtime context for executing a `flint` command.
 /// Allows injecting an in-memory filesystem, custom writers, clock/RNG, and environment in tests.
@@ -202,10 +203,36 @@ pub fn runWithContext(ctx: Context, args: []const []const u8) u8 {
         extracted.store_flag,
         ctx.env_flint_store,
         ctx.cwd,
-    ) catch |err| {
+    ) catch |err| blk: {
+        if (err == error.Refuse and (std.mem.eql(u8, verb, "init") or std.mem.eql(u8, verb, "clone"))) {
+            const clean_cwd = fsys.cleanPath(ctx.allocator, if (ctx.cwd.len > 0) ctx.cwd else ".") catch |e| return handleErr(e, ctx.stdout);
+            defer ctx.allocator.free(clean_cwd);
+            break :blk fsys.joinPath(ctx.allocator, &.{ clean_cwd, ".flint" }) catch |e| return handleErr(e, ctx.stdout);
+        }
         return handleErr(err, ctx.stdout);
     };
     defer ctx.allocator.free(root);
+
+    if (std.mem.eql(u8, verb, "init")) {
+        workspace.cmdInit(ctx.allocator, ctx.fs, root, uuid_gen, ctx.stdout, sub) catch |err| {
+            return handleErr(err, ctx.stdout);
+        };
+        return 0;
+    }
+
+    if (std.mem.eql(u8, verb, "add")) {
+        workspace.cmdAdd(ctx.allocator, ctx.fs, root, uuid_gen, ctx.stdout, sub) catch |err| {
+            return handleErr(err, ctx.stdout);
+        };
+        return 0;
+    }
+
+    if (std.mem.eql(u8, verb, "status")) {
+        workspace.cmdStatus(ctx.allocator, ctx.fs, root, ctx.stdout, sub) catch |err| {
+            return handleErr(err, ctx.stdout);
+        };
+        return 0;
+    }
 
     if (std.mem.eql(u8, verb, "keygen")) {
         ed25519.cmdKeygen(ctx.allocator, ctx.fs, root, uuid_gen, sub, ctx.stdout) catch |err| {
@@ -232,6 +259,7 @@ test {
     _ = canon;
     _ = parser;
     _ = render;
+    _ = workspace;
 }
 
 const TestHarness = struct {
@@ -1056,3 +1084,547 @@ test "CLI parse-corpus on Zig files" {
     }
     try std.testing.expectEqual(@as(usize, 6), line_count);
 }
+
+test "init layout and refusals" {
+    const gpa = std.testing.allocator;
+    var h = try TestHarness.init(gpa);
+    defer h.deinit();
+    const mfs = h.mem.fs();
+    try mfs.mkdir(gpa, "/host/src");
+
+    // 1. Fresh init creates streams/<id>.json, ws/w/WORKSPACE.json, and empty ws/w/ATOMS.jsonl.
+    {
+        const res = try h.runCmd(&.{ "init", "--name=w", "--src=/host/src" });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+        try std.testing.expectEqualStrings("flint: init ok ws=w stream=main\n", res.out);
+    }
+
+    var idx = try store.loadStoreIndex(gpa, mfs, h.root);
+    defer idx.deinit();
+    try std.testing.expectEqual(@as(usize, 1), idx.streams.items.len);
+    const st = idx.streams.items[0];
+    try std.testing.expectEqualStrings("main", st.name);
+    try std.testing.expect(st.head == null);
+    try std.testing.expectEqual(h.now * 1000, st.created);
+
+    try std.testing.expectEqual(@as(usize, 1), idx.workspaces.items.len);
+    const ws = idx.workspaces.items[0];
+    try std.testing.expectEqualStrings("w", ws.name);
+    try std.testing.expectEqualStrings("/host/src", ws.src);
+    try std.testing.expectEqualStrings(st.id, ws.stream);
+
+    const atoms_data = try mfs.readFile(gpa, "/host/FLINT/ws/w/ATOMS.jsonl", store.MaxFileReadBytes);
+    defer gpa.free(atoms_data);
+    try std.testing.expectEqual(@as(usize, 0), atoms_data.len);
+
+    // 2. Re-init same workspace -> refuse ws_exists.
+    {
+        const res = try h.runCmd(&.{ "init", "--name=w", "--src=/host/src" });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 1), res.rc);
+        try std.testing.expectEqualStrings("flint: refuse ws_exists\n", res.out);
+    }
+
+    // 3. Init different workspace while `main` stream exists -> refuse stream_exists main.
+    {
+        const res = try h.runCmd(&.{ "init", "--name=w2", "--src=/host/src" });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 1), res.rc);
+        try std.testing.expectEqualStrings("flint: refuse stream_exists main\n", res.out);
+    }
+
+    // 4. Missing src -> refuse src_missing.
+    {
+        const res = try h.runCmd(&.{ "init", "--name=w3", "--src=/host/missing" });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 1), res.rc);
+        try std.testing.expectEqualStrings("flint: refuse src_missing\n", res.out);
+    }
+
+    // 5. Invalid workspace name -> refuse usage (exit 2).
+    {
+        const res = try h.runCmd(&.{ "init", "--name=Bad_Name", "--src=/host/src" });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 2), res.rc);
+        try std.testing.expectEqualStrings("flint: refuse usage\n", res.out);
+    }
+
+    // 6. Clock unset -> refuse clock_unset on init.
+    {
+        var h2 = try TestHarness.init(gpa);
+        defer h2.deinit();
+        try h2.mem.fs().mkdir(gpa, "/host/src");
+        h2.now = 0;
+        const res = try h2.runCmd(&.{ "init", "--name=w", "--src=/host/src" });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 1), res.rc);
+        try std.testing.expectEqualStrings("flint: refuse clock_unset\n", res.out);
+    }
+}
+
+test "add idempotent, edits, and full 245-atom corpus" {
+    const gpa = std.testing.allocator;
+    var host_fs = fsys.HostFS.init(std.testing.io);
+    const hfs = host_fs.fs();
+
+    const sample_go = try hfs.readFile(gpa, "testdata/corpus/go/sample.go", store.MaxFileReadBytes);
+    defer gpa.free(sample_go);
+    const sample_zig = try hfs.readFile(gpa, "testdata/corpus/zig/sample.zig", store.MaxFileReadBytes);
+    defer gpa.free(sample_zig);
+
+    var h = try TestHarness.init(gpa);
+    defer h.deinit();
+    const mfs = h.mem.fs();
+    try mfs.writeFileSafe(gpa, "/host/src/go/sample.go", sample_go);
+    try mfs.writeFileSafe(gpa, "/host/src/zig/sample.zig", sample_zig);
+
+    {
+        const res = try h.runCmd(&.{ "init", "--name=w", "--src=/host/src" });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+    }
+
+    // 1. Add go/sample.go -> 4 new Atoms.
+    {
+        const res = try h.runCmd(&.{ "add", "/host/src/go/sample.go" });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+        try std.testing.expectEqualStrings("flint: add files=1 new=4 modified=0 deleted=0 unchanged=0\n", res.out);
+    }
+
+    const atoms1 = try store.loadWorkspaceAtoms(gpa, mfs, h.root, "w");
+    defer store.freeStoredAtoms(gpa, atoms1);
+    try std.testing.expectEqual(@as(usize, 4), atoms1.len);
+
+    var id_by_name = std.StringHashMap([]u8).init(gpa);
+    defer {
+        var it = id_by_name.iterator();
+        while (it.next()) |kv| gpa.free(kv.value_ptr.*);
+        id_by_name.deinit();
+    }
+    var orig_add_hash: []u8 = &.{};
+    defer if (orig_add_hash.len > 0) gpa.free(orig_add_hash);
+    var orig_add_sig_hash: []u8 = &.{};
+    defer if (orig_add_sig_hash.len > 0) gpa.free(orig_add_sig_hash);
+
+    for (atoms1) |a| {
+        try id_by_name.put(a.name, try gpa.dupe(u8, a.id));
+        if (std.mem.eql(u8, a.name, "sample.Add")) {
+            orig_add_hash = try gpa.dupe(u8, a.hash);
+            orig_add_sig_hash = try gpa.dupe(u8, a.sig_hash);
+        }
+    }
+
+    const stage1 = try mfs.readFile(gpa, "/host/FLINT/ws/w/STAGE.jsonl", store.MaxFileReadBytes);
+    defer gpa.free(stage1);
+
+    // 2. Re-add go/sample.go -> 0 new, 4 unchanged; Atom IDs and STAGE.jsonl byte-identical.
+    {
+        const res = try h.runCmd(&.{ "add", "/host/src/go/sample.go" });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+        try std.testing.expectEqualStrings("flint: add files=1 new=0 modified=0 deleted=0 unchanged=4\n", res.out);
+    }
+
+    const atoms2 = try store.loadWorkspaceAtoms(gpa, mfs, h.root, "w");
+    defer store.freeStoredAtoms(gpa, atoms2);
+    for (atoms2) |a| {
+        try std.testing.expectEqualStrings(id_by_name.get(a.name).?, a.id);
+    }
+    const stage2 = try mfs.readFile(gpa, "/host/FLINT/ws/w/STAGE.jsonl", store.MaxFileReadBytes);
+    defer gpa.free(stage2);
+    try std.testing.expectEqualStrings(stage1, stage2);
+
+    // 3. Add zig/sample.zig -> 6 new Atoms (total 10 in ATOMS.jsonl).
+    {
+        const res = try h.runCmd(&.{ "add", "/host/src/zig/sample.zig" });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+        try std.testing.expectEqualStrings("flint: add files=1 new=6 modified=0 deleted=0 unchanged=0\n", res.out);
+    }
+
+    // Simulate a commit having cleared STAGE.jsonl so subsequent edits produce modify + delete ops.
+    try mfs.remove(gpa, "/host/FLINT/ws/w/STAGE.jsonl");
+
+    // 4. Edit sample.go (`Add` body changed, `Answer` removed) and sample.zig (comment/whitespace only).
+    try mfs.writeFileSafe(
+        gpa,
+        "/host/src/go/sample.go",
+        "package sample\n\ntype Point struct {\n\tX, Y int\n}\n\nfunc Add(a, b int) int {\n\treturn a + b + 1\n}\n\nfunc Mul(a, b int) int {\n\treturn a * b\n}\n",
+    );
+    const zig_with_comment = try std.fmt.allocPrint(gpa, "// formatting-only edit\n\n{s}\n", .{sample_zig});
+    defer gpa.free(zig_with_comment);
+    try mfs.writeFileSafe(gpa, "/host/src/zig/sample.zig", zig_with_comment);
+
+    {
+        const res = try h.runCmd(&.{"add"});
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+        try std.testing.expectEqualStrings("flint: add files=2 new=0 modified=1 deleted=1 unchanged=8\n", res.out);
+    }
+
+    const stage_ops = try store.loadWorkspaceStage(gpa, mfs, h.root, "w");
+    defer store.freeOps(gpa, stage_ops);
+    try std.testing.expectEqual(@as(usize, 2), stage_ops.len);
+
+    var saw_mod = false;
+    var saw_del = false;
+    for (stage_ops) |op| {
+        if (std.mem.eql(u8, op.type, "modify")) {
+            saw_mod = true;
+            try std.testing.expectEqualStrings(id_by_name.get("sample.Add").?, op.atom_id);
+            try std.testing.expectEqualStrings(orig_add_hash, op.old_hash);
+            try std.testing.expect(!std.mem.eql(u8, orig_add_hash, op.new_hash));
+            try std.testing.expectEqualStrings(orig_add_sig_hash, op.new_sig_hash);
+        } else if (std.mem.eql(u8, op.type, "delete")) {
+            saw_del = true;
+            try std.testing.expectEqualStrings(id_by_name.get("sample.Answer").?, op.atom_id);
+            try std.testing.expect(op.old_hash.len > 0);
+        }
+    }
+    try std.testing.expect(saw_mod and saw_del);
+
+    // 5. Full 100-file / 245-atom corpus add + idempotent re-add on HostFS + MemFS.
+    var h_full = try TestHarness.init(gpa);
+    defer h_full.deinit();
+    const mfs_full = h_full.mem.fs();
+
+    for ([_][]const u8{ "go", "zig" }) |sub| {
+        const dir = try std.fmt.allocPrint(gpa, "testdata/corpus/{s}", .{sub});
+        defer gpa.free(dir);
+        const entries = try hfs.list(gpa, dir);
+        defer fsys.FS.freeDirEntries(gpa, entries);
+        for (entries) |e| {
+            if (e.is_dir) continue;
+            const disk_path = try std.fmt.allocPrint(gpa, "{s}/{s}", .{ dir, e.name });
+            defer gpa.free(disk_path);
+            const content = try hfs.readFile(gpa, disk_path, store.MaxFileReadBytes);
+            defer gpa.free(content);
+            const mem_path = try std.fmt.allocPrint(gpa, "/host/corpus/{s}/{s}", .{ sub, e.name });
+            defer gpa.free(mem_path);
+            try mfs_full.writeFileSafe(gpa, mem_path, content);
+        }
+    }
+
+    {
+        const res = try h_full.runCmd(&.{ "init", "--name=c", "--src=/host/corpus" });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+    }
+    {
+        const res = try h_full.runCmd(&.{ "add", "--ws=c" });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+        try std.testing.expectEqualStrings("flint: add files=100 new=245 modified=0 deleted=0 unchanged=0\n", res.out);
+    }
+    {
+        const res = try h_full.runCmd(&.{ "add", "--ws=c" });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+        try std.testing.expectEqualStrings("flint: add files=100 new=0 modified=0 deleted=0 unchanged=245\n", res.out);
+    }
+    {
+        const res = try h_full.runCmd(&.{ "status", "--ws=c" });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+        try std.testing.expect(std.mem.indexOf(
+            u8,
+            res.out,
+            "flint: status ws=c stream=main atoms=245 staged=245 add=245 modify=0 delete=0 duplicates=0\n",
+        ) != null);
+        try std.testing.expect(std.mem.indexOf(u8, res.out, "flint: stage … +181\n") != null);
+    }
+}
+
+test "stage fold rules and status" {
+    const gpa = std.testing.allocator;
+    var host_fs = fsys.HostFS.init(std.testing.io);
+    const hfs = host_fs.fs();
+    const sample_go = try hfs.readFile(gpa, "testdata/corpus/go/sample.go", store.MaxFileReadBytes);
+    defer gpa.free(sample_go);
+    const sample_zig = try hfs.readFile(gpa, "testdata/corpus/zig/sample.zig", store.MaxFileReadBytes);
+    defer gpa.free(sample_zig);
+
+    var h = try TestHarness.init(gpa);
+    defer h.deinit();
+    const mfs = h.mem.fs();
+    try mfs.writeFileSafe(gpa, "/host/src/go/sample.go", sample_go);
+    try mfs.writeFileSafe(gpa, "/host/src/zig/sample.zig", sample_zig);
+
+    {
+        const res = try h.runCmd(&.{ "init", "--name=w", "--src=/host/src" });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+    }
+    {
+        const res = try h.runCmd(&.{ "add", "/host/src/go/sample.go" });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+    }
+
+    // Rule 1 & 2: add + modify -> add (with updated hash); add + delete -> nothing (vanishes).
+    try mfs.writeFileSafe(
+        gpa,
+        "/host/src/go/sample.go",
+        "package sample\n\ntype Point struct {\n\tX, Y int\n}\n\nfunc Add(a, b int) int {\n\treturn a + b + 99\n}\n\nfunc Mul(a, b int) int {\n\treturn a * b\n}\n",
+    );
+    {
+        const res = try h.runCmd(&.{ "add", "/host/src/go/sample.go" });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+        try std.testing.expectEqualStrings("flint: add files=1 new=0 modified=1 deleted=1 unchanged=2\n", res.out);
+    }
+
+    const stage = try store.loadWorkspaceStage(gpa, mfs, h.root, "w");
+    defer store.freeOps(gpa, stage);
+    try std.testing.expectEqual(@as(usize, 3), stage.len);
+    for (stage) |op| {
+        try std.testing.expectEqualStrings("add", op.type);
+        try std.testing.expect(!std.mem.eql(u8, op.new_name, "sample.Answer"));
+    }
+
+    // Status reflects 3 atoms, 3 staged (all add).
+    {
+        const res = try h.runCmd(&.{"status"});
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+        try std.testing.expect(std.mem.indexOf(
+            u8,
+            res.out,
+            "flint: status ws=w stream=main atoms=3 staged=3 add=3 modify=0 delete=0 duplicates=0\n",
+        ) != null);
+        try std.testing.expect(std.mem.indexOf(u8, res.out, "flint: stage add sample.Add\n") != null);
+    }
+
+    // Rule 3 & 4: clear stage (as if committed), then modify + modify -> single modify with original old_hash;
+    // then modify + delete -> single delete with original old_hash.
+    try mfs.remove(gpa, "/host/FLINT/ws/w/STAGE.jsonl");
+    const atoms_before = try store.loadWorkspaceAtoms(gpa, mfs, h.root, "w");
+    defer store.freeStoredAtoms(gpa, atoms_before);
+    var add_before_hash: []u8 = &.{};
+    defer if (add_before_hash.len > 0) gpa.free(add_before_hash);
+    for (atoms_before) |a| {
+        if (std.mem.eql(u8, a.name, "sample.Add")) {
+            add_before_hash = try gpa.dupe(u8, a.hash);
+        }
+    }
+
+    try mfs.writeFileSafe(
+        gpa,
+        "/host/src/go/sample.go",
+        "package sample\n\ntype Point struct {\n\tX, Y int\n}\n\nfunc Add(a, b int) int {\n\treturn a + b + 200\n}\n\nfunc Mul(a, b int) int {\n\treturn a * b\n}\n",
+    );
+    {
+        const res = try h.runCmd(&.{ "add", "/host/src/go/sample.go" });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+    }
+
+    try mfs.writeFileSafe(
+        gpa,
+        "/host/src/go/sample.go",
+        "package sample\n\ntype Point struct {\n\tX, Y int\n}\n\nfunc Add(a, b int) int {\n\treturn a + b + 300\n}\n\nfunc Mul(a, b int) int {\n\treturn a * b\n}\n",
+    );
+    {
+        const res = try h.runCmd(&.{ "add", "/host/src/go/sample.go" });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+    }
+
+    const stage_mod = try store.loadWorkspaceStage(gpa, mfs, h.root, "w");
+    defer store.freeOps(gpa, stage_mod);
+    try std.testing.expectEqual(@as(usize, 1), stage_mod.len);
+    try std.testing.expectEqualStrings("modify", stage_mod[0].type);
+    try std.testing.expectEqualStrings(add_before_hash, stage_mod[0].old_hash);
+
+    // Now delete Add -> modify + delete folds to delete with original old_hash.
+    try mfs.writeFileSafe(
+        gpa,
+        "/host/src/go/sample.go",
+        "package sample\n\ntype Point struct {\n\tX, Y int\n}\n\nfunc Mul(a, b int) int {\n\treturn a * b\n}\n",
+    );
+    {
+        const res = try h.runCmd(&.{ "add", "/host/src/go/sample.go" });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+    }
+
+    const stage_del = try store.loadWorkspaceStage(gpa, mfs, h.root, "w");
+    defer store.freeOps(gpa, stage_del);
+    try std.testing.expectEqual(@as(usize, 1), stage_del.len);
+    try std.testing.expectEqualStrings("delete", stage_del[0].type);
+    try std.testing.expectEqualStrings(add_before_hash, stage_del[0].old_hash);
+
+    // Also test disappeared file from directory: add zig/sample.zig, clear stage, remove zig/sample.zig, run add.
+    {
+        const res = try h.runCmd(&.{ "add", "/host/src/zig/sample.zig" });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+    }
+    try mfs.remove(gpa, "/host/FLINT/ws/w/STAGE.jsonl");
+    try mfs.remove(gpa, "/host/src/zig/sample.zig");
+    {
+        const res = try h.runCmd(&.{"add"});
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+        try std.testing.expectEqualStrings("flint: add files=1 new=0 modified=0 deleted=6 unchanged=2\n", res.out);
+    }
+}
+
+test "parse error and duplicate decl all-or-nothing" {
+    const gpa = std.testing.allocator;
+    var host_fs = fsys.HostFS.init(std.testing.io);
+    const hfs = host_fs.fs();
+    const sample_go = try hfs.readFile(gpa, "testdata/corpus/go/sample.go", store.MaxFileReadBytes);
+    defer gpa.free(sample_go);
+    const sample_zig = try hfs.readFile(gpa, "testdata/corpus/zig/sample.zig", store.MaxFileReadBytes);
+    defer gpa.free(sample_zig);
+    const bad_go = try hfs.readFile(gpa, "testdata/corpus/refuse/bad.go", store.MaxFileReadBytes);
+    defer gpa.free(bad_go);
+
+    var h = try TestHarness.init(gpa);
+    defer h.deinit();
+    const mfs = h.mem.fs();
+    try mfs.writeFileSafe(gpa, "/host/src/go/a.go", sample_go);
+    try mfs.writeFileSafe(gpa, "/host/src/go/b.go", bad_go);
+    try mfs.writeFileSafe(gpa, "/host/src/zig/c.zig", sample_zig);
+
+    {
+        const res = try h.runCmd(&.{ "init", "--name=w", "--src=/host/src" });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+    }
+
+    // 1 of 3 files has a syntax error -> must refuse and stage 0 ops.
+    {
+        const res = try h.runCmd(&.{"add"});
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 1), res.rc);
+        try std.testing.expect(std.mem.indexOf(u8, res.out, "flint: refuse syntax") != null);
+        try std.testing.expect(std.mem.indexOf(u8, res.out, "go/b.go") != null);
+    }
+    try std.testing.expect(!mfs.exists(gpa, "/host/FLINT/ws/w/STAGE.jsonl"));
+    const atoms = try store.loadWorkspaceAtoms(gpa, mfs, h.root, "w");
+    defer store.freeStoredAtoms(gpa, atoms);
+    try std.testing.expectEqual(@as(usize, 0), atoms.len);
+
+    // Duplicate declaration in a file -> refuse duplicate_decl and stage 0 ops.
+    try mfs.remove(gpa, "/host/src/go/b.go");
+    try mfs.writeFileSafe(gpa, "/host/src/zig/dup.zig", "pub fn foo() void {}\npub fn foo() void {}\n");
+    {
+        const res = try h.runCmd(&.{"add"});
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 1), res.rc);
+        try std.testing.expect(std.mem.indexOf(u8, res.out, "flint: refuse duplicate_decl zig/dup.zig") != null);
+    }
+    try std.testing.expect(!mfs.exists(gpa, "/host/FLINT/ws/w/STAGE.jsonl"));
+}
+
+test "torn line, store bounds, stale head, and guest store portability" {
+    const gpa = std.testing.allocator;
+    var h = try TestHarness.init(gpa);
+    defer h.deinit();
+    const mfs = h.mem.fs();
+    try mfs.mkdir(gpa, "/host/src");
+
+    {
+        const res = try h.runCmd(&.{ "init", "--name=w", "--src=/host/src" });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+    }
+
+    // 1. Torn final line in ATOMS.jsonl -> refuse stream_torn.
+    try mfs.writeFileSafe(gpa, "/host/FLINT/ws/w/ATOMS.jsonl", "{\"id\":\"x\",\"kind\":\"fn\",\"name\":\"p.F\"");
+    {
+        const res = try h.runCmd(&.{"status"});
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 1), res.rc);
+        try std.testing.expect(std.mem.indexOf(u8, res.out, "flint: refuse stream_torn") != null);
+    }
+
+    // 2. File size bound (> 4 MiB) -> refuse store_too_large file.
+    const big = try gpa.alloc(u8, store.MaxFileReadBytes + 16);
+    defer gpa.free(big);
+    @memset(big, 'a');
+    try mfs.writeFileSafe(gpa, "/host/FLINT/ws/w/ATOMS.jsonl", big);
+    {
+        const res = try h.runCmd(&.{"status"});
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 1), res.rc);
+        try std.testing.expectEqualStrings("flint: refuse store_too_large file\n", res.out);
+    }
+
+    // 3. Atoms bound (> 4096 Atoms) -> refuse store_too_large atoms.
+    var many_atoms: Io.Writer.Allocating = .init(gpa);
+    defer many_atoms.deinit();
+    const line = "{\"id\":\"01950000-0000-7000-8000-000000000001\",\"kind\":\"fn\",\"name\":\"p.F\",\"hash\":\"00\",\"sig_hash\":\"00\",\"span\":{\"file\":\"a.go\",\"start\":0,\"end\":1}}\n";
+    var k: usize = 0;
+    while (k < store.MaxAtoms + 1) : (k += 1) {
+        try many_atoms.writer.writeAll(line);
+    }
+    try mfs.writeFileSafe(gpa, "/host/FLINT/ws/w/ATOMS.jsonl", many_atoms.written());
+    {
+        const res = try h.runCmd(&.{"status"});
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 1), res.rc);
+        try std.testing.expectEqualStrings("flint: refuse store_too_large atoms\n", res.out);
+    }
+
+    // 4. Stale head guard -> refuse stale_head.
+    try mfs.writeFileSafe(gpa, "/host/FLINT/ws/w/ATOMS.jsonl", "");
+    var idx = try store.loadStoreIndex(gpa, mfs, h.root);
+    defer idx.deinit();
+    const st = idx.streams.items[0];
+    try std.testing.expectError(
+        error.Refuse,
+        store.checkStaleHead(gpa, mfs, h.root, st.id, "01950000-0000-7000-8000-ffffffffffff"),
+    );
+    try std.testing.expectEqualStrings("stale_head", fsys.last_refuse.code());
+
+    // 5. Guest store portability: a workspace pointing to non-existent `/host/guest-only-src`
+    // does not prevent `init --name=hostws --src=/host/src --stream=main` from replaying `main`.
+    try store.writeWorkspaceConfig(gpa, mfs, h.root, .{
+        .name = "w",
+        .src = "/host/guest-only-src",
+        .stream = st.id,
+        .created = 1760000000000,
+    });
+    {
+        const res = try h.runCmd(&.{ "init", "--name=hostws", "--src=/host/src", "--stream=main" });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+        try std.testing.expectEqualStrings("flint: init ok ws=hostws stream=main atoms=0 replayed=0\n", res.out);
+    }
+}
+
+test "HostFS writeFileSafe and appendSync crash-safe file operations" {
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const tmp_abs = try tmp.dir.realPathFileAlloc(std.testing.io, ".", gpa);
+    defer gpa.free(tmp_abs);
+
+    var host_fs = fsys.HostFS.init(std.testing.io);
+    const fs = host_fs.fs();
+
+    const target = try std.fmt.allocPrint(gpa, "{s}/nested/ATOMS.jsonl", .{tmp_abs});
+    defer gpa.free(target);
+
+    try fs.writeFileSafe(gpa, target, "line1\n");
+    try fs.appendSync(gpa, target, "line2\n");
+
+    const data = try fs.readFile(gpa, target, store.MaxFileReadBytes);
+    defer gpa.free(data);
+    try std.testing.expectEqualStrings("line1\nline2\n", data);
+
+    // Ensure no leftover `.tmp-*` file remains in `nested/`.
+    const nested_dir = try std.fmt.allocPrint(gpa, "{s}/nested", .{tmp_abs});
+    defer gpa.free(nested_dir);
+    const entries = try fs.list(gpa, nested_dir);
+    defer fsys.FS.freeDirEntries(gpa, entries);
+    try std.testing.expectEqual(@as(usize, 1), entries.len);
+    try std.testing.expectEqualStrings("ATOMS.jsonl", entries[0].name);
+}
+

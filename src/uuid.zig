@@ -51,10 +51,10 @@ pub const UUIDGen = struct {
     }
 
     /// NowMs returns the current Unix timestamp in milliseconds (`Now()*1000`),
-    /// or refuses with `clock_unset` when `Now() < 0`.
+    /// or refuses with `clock_unset` when `Now() <= 0`.
     pub fn nowMs(self: *const UUIDGen) !i64 {
         const sec = self.nowSeconds();
-        if (sec < 0) {
+        if (sec <= 0) {
             return fsys.refuse("clock_unset", "");
         }
         return sec * 1000;
