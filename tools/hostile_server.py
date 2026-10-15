@@ -27,17 +27,7 @@ TIMEOUT = 8  # seconds a client invocation may take before it counts as hung
 
 # Scenarios that reproduce a tracked issue report KNOWN; once fixed they fail the
 # run so the marker gets removed.
-KNOWN = {
-    "clone: silent server on hello": "#51",
-    "pull: silent server on hello": "#51",
-    "clone: silent server on read": "#51",
-    "pull: silent server on read": "#51",
-    "clone: truncated read reply": "#51",
-    "pull: truncated read reply": "#51",
-    "push: silent server on hello": "#51",
-    "clone: remote stream name is path-like": "#52",
-    "clone: remote stream name has ANSI escapes": "#52",
-}
+KNOWN = {}
 RESULTS = []
 
 
@@ -233,10 +223,12 @@ def run_scenario(fx, verb, title, op, mutate, must_refuse):
     before = tree(client)
     proxy = Proxy(fx.port, on(op, mutate))
     remote = f"tcp://127.0.0.1:{proxy.port}"
+    # --read-timeout=2 keeps silent/truncated-reply scenarios inside the 8s
+    # invocation budget while still exercising the client's read deadline.
     if verb == "clone":
-        args = [f"--store={client}", "clone", remote, "--stream=main", "--name=main", f"--src={client / 'src'}"]
+        args = [f"--store={client}", "clone", remote, "--stream=main", "--name=main", f"--src={client / 'src'}", "--read-timeout=2"]
     else:
-        args = [f"--store={client}", "pull", f"--remote={remote}", "--stream=main"]
+        args = [f"--store={client}", "pull", f"--remote={remote}", "--stream=main", "--read-timeout=2"]
     rc, out, secs = flint(*args)
     proxy.close()
     problems = []
@@ -265,7 +257,7 @@ def run_scenario(fx, verb, title, op, mutate, must_refuse):
 def push_hang(fx):
     proxy = Proxy(fx.port, on("hello", lambda r, raw: "HANG"))
     fx.commit()
-    rc, out, _ = flint(f"--store={fx.author}", "push", f"--remote=tcp://127.0.0.1:{proxy.port}")
+    rc, out, _ = flint(f"--store={fx.author}", "push", f"--remote=tcp://127.0.0.1:{proxy.port}", "--read-timeout=2")
     proxy.close()
     record("push: silent server on hello", rc != "HANG", "hung >%ds" % TIMEOUT)
 

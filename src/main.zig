@@ -14,6 +14,7 @@ pub const workspace = @import("workspace.zig");
 pub const sign = @import("sign.zig");
 pub const merge = @import("merge.zig");
 pub const sync = @import("sync.zig");
+pub const release = @import("release.zig");
 
 /// Runtime context for executing a `flint` command.
 /// Allows injecting an in-memory filesystem, custom writers, clock/RNG, and environment in tests.
@@ -105,6 +106,7 @@ fn printHelp(w: *Io.Writer) void {
         \\  clone <remote> --stream=<s> --name=<n> --src=<dir> [--auth-key=<file>]
         \\  push [--remote=<url>] [--stream=<s>] [--ws=<n>] [--auth-key=<file>]
         \\  pull [--remote=<url>] [--stream=<s>] [--ws=<n>] [--auth-key=<file>] [--reset]
+        \\  release --elf=<f> --name=<n> --version=<v> [--manifest-row=<r>] [--ws=<n>] [--key=<k>] [-m <msg>] [--dry-run]
         \\  parse-corpus <dir>
         \\  keygen [--name=<n>]
         \\
@@ -123,6 +125,7 @@ fn friendlyErrorName(err: anyerror) []const u8 {
         error.ConnectionRefused => "connection refused",
         error.ConnectionResetByPeer => "connection reset by peer",
         error.ConnectionTimedOut => "connection timed out",
+        error.Timeout => "timed out",
         error.UnknownHostName => "unknown host",
         error.NameServerFailure => "name resolution failed",
         error.HostUnreachable => "host unreachable",
@@ -232,6 +235,24 @@ pub fn runWithContext(ctx: Context, args: []const []const u8) u8 {
         return render.cmdParseCorpus(ctx.allocator, ctx.fs, sub, ctx.stdout) catch |err| {
             return handleErr(err, ctx.stdout);
         };
+    }
+
+    // `release` resolves the store itself so `--dry-run` works anywhere.
+    if (std.mem.eql(u8, verb, "release")) {
+        release.cmdRelease(
+            ctx.allocator,
+            ctx.fs,
+            extracted.store_flag,
+            ctx.env_flint_store,
+            ctx.env_flint_sign_key,
+            ctx.cwd,
+            uuid_gen,
+            ctx.stdout,
+            sub,
+        ) catch |err| {
+            return handleErr(err, ctx.stdout);
+        };
+        return 0;
     }
 
     const is_known_store_verb = std.mem.eql(u8, verb, "keygen") or
@@ -401,6 +422,7 @@ test {
     _ = sign;
     _ = merge;
     _ = sync;
+    _ = release;
 }
 
 const TestHarness = struct {
@@ -3567,6 +3589,31 @@ test "transport errors print verb + remote context, not raw error names (#31)" {
         defer gpa.free(res.out);
         try std.testing.expectEqual(@as(u8, 1), res.rc);
         try std.testing.expectEqualStrings("flint: refuse remote_missing\n", res.out);
+    }
+}
+
+test "--read-timeout=0 refuses usage on remote verbs; silent peer times out (#51)" {
+    const gpa = std.testing.allocator;
+    var h = try TestHarness.init(gpa);
+    defer h.deinit();
+    const fs = h.mem.fs();
+    try fs.mkdir(gpa, "/host/SRCA");
+    {
+        const res = try h.runCmd(&.{ "init", "--name=a", "--src=/host/SRCA" });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+    }
+
+    for ([_][]const []const u8{
+        &.{ "push", "--read-timeout=0" },
+        &.{ "push", "--read-timeout=abc" },
+        &.{ "pull", "--read-timeout", "0" },
+        &.{ "clone", "tcp://127.0.0.1:1", "--stream=main", "--name=b", "--src=/host/SRCB", "--read-timeout=0" },
+    }) |cmd| {
+        const res = try h.runCmd(cmd);
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 2), res.rc);
+        try std.testing.expectEqualStrings("flint: refuse usage\n", res.out);
     }
 }
 
