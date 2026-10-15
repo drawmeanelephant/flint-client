@@ -1,0 +1,18 @@
+[
+  {"name":"P0","color":"b60205","description":"Data loss, urgent security, or critical outage"},
+  {"name":"P1","color":"d93f0b","description":"Core workflow blocked"},
+  {"name":"P2","color":"fbca04","description":"Normal priority"},
+  {"name":"P3","color":"c5def5","description":"Minor or deferred"},
+  {"name":"bug","color":"d73a4a","description":"Incorrect behavior or regression"},
+  {"name":"enhancement","color":"a2eeef","description":"New or improved behavior"},
+  {"name":"chore","color":"ededed","description":"Maintenance or technical debt"},
+  {"name":"documentation","color":"0075ca","description":"Documentation or examples"},
+  {"name":"area:cli","color":"5319e7","description":"CLI arguments and output"},
+  {"name":"area:parser","color":"5319e7","description":"Go/Zig tokenization and parsing"},
+  {"name":"area:store","color":"5319e7","description":"Persistence, replay, and staging"},
+  {"name":"area:signing","color":"5319e7","description":"Canonical bytes, keys, and signatures"},
+  {"name":"area:merge","color":"5319e7","description":"Forks, ancestry, and semantic merge"},
+  {"name":"area:sync","color":"5319e7","description":"Remote transport and sync"},
+  {"name":"area:tooling","color":"5319e7","description":"Build, CI, release, and quality tools"},
+  {"name":"area:docs","color":"5319e7","description":"Docs, QA guides, and runbooks"}
+]

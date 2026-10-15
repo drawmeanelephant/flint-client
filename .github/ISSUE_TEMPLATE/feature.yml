@@ -1,0 +1,31 @@
+name: Feature or maintenance request
+description: Propose a focused improvement with verifiable acceptance criteria.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem and user impact
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria and tests
+      description: Explain expected behavior, compatibility constraints, and verification.
+    validations:
+      required: true
+  - type: dropdown
+    id: priority
+    attributes:
+      label: Suggested priority
+      options: ["P1 - core workflow blocked", "P2 - normal", "P3 - minor"]
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options: [cli, parser, store, signing, merge, sync, tooling, docs]
+    validations:
+      required: true

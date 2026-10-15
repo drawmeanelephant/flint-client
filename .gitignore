@@ -6,3 +6,22 @@ zig-out/
 # OS / editor noise
 .DS_Store
 **/.DS_Store
+
+# Build reports, Python tooling, and editor state
+build/
+dist/
+__pycache__/
+*.pyc
+.venv/
+.idea/
+.vscode/
+*.swp
+
+# Local credentials and FLINT stores (never commit signing keys)
+.env
+.env.*
+!.env.example
+!.env.template
+.flint/
+FLINT/
+*.OUT

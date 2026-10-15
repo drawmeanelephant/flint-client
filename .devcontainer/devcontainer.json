@@ -1,0 +1,12 @@
+{
+  "name": "FLINT Zig 0.17",
+  "build": {"dockerfile": "Dockerfile"},
+  "remoteUser": "vscode",
+  "postCreateCommand": "python3 tools/check.py --quick",
+  "customizations": {
+    "vscode": {
+      "extensions": ["ziglang.vscode-zig", "ms-python.python"],
+      "settings": {"zig.path": "/usr/local/bin/zig"}
+    }
+  }
+}
