@@ -33,6 +33,16 @@ pub const MaxChangeBytes: usize = 1024 * 1024;
 pub const stale_head_recovery_hint =
     "remote head advanced; pull to catch up (diverged: fork <stream> <aside>, pull --reset, merge <aside>, push)";
 
+/// Default per-reply deadline for remote verbs (#51): a peer that connects and
+/// then goes silent must not block `clone`/`pull`/`push` forever.
+pub const default_read_timeout_ms: u64 = 30_000;
+
+/// Options `defaultTcpDial` reads from its `dial_ctx`; other injected dialers
+/// ignore `dial_ctx` handling and are unaffected.
+pub const TcpDialOptions = struct {
+    read_timeout_ms: u64 = default_read_timeout_ms,
+};
+
 fn readStreamRawLines(allocator: Allocator, fs: FS, root: []const u8, stream_id: []const u8) ![][]u8 {
     const p = try store.streamLogPath(allocator, root, stream_id);
     defer allocator.free(p);
@@ -146,8 +156,10 @@ const TcpTransport = struct {
     stream: Io.net.Stream,
     read_buf: [8192]u8 = undefined,
     write_buf: [8192]u8 = undefined,
-    reader: Io.net.Stream.Reader = undefined,
     writer: Io.net.Stream.Writer = undefined,
+    buf_len: usize = 0,
+    buf_pos: usize = 0,
+    read_timeout_ms: u64 = default_read_timeout_ms,
 
     fn init(allocator: Allocator, io: Io, stream: Io.net.Stream) !*TcpTransport {
         const self = try allocator.create(TcpTransport);
@@ -155,9 +167,30 @@ const TcpTransport = struct {
             .io = io,
             .stream = stream,
         };
-        self.reader = self.stream.reader(io, &self.read_buf);
         self.writer = self.stream.writer(io, &self.write_buf);
         return self;
+    }
+
+    /// One socket fill under `io.operateTimeout` so a silent peer surfaces as
+    /// `error.Timeout` instead of blocking the verb forever.
+    fn fillReadBuf(self: *TcpTransport, timeout: Io.Timeout) !usize {
+        var bufs = [_][]u8{self.read_buf[0..]};
+        const res = try (try self.io.operateTimeout(.{ .net_read = .{
+            .socket_handle = self.stream.socket.handle,
+            .data = &bufs,
+        } }, timeout)).net_read;
+        self.buf_len = res.data_len;
+        self.buf_pos = 0;
+        return res.data_len;
+    }
+
+    fn nextByte(self: *TcpTransport, timeout: Io.Timeout) !?u8 {
+        if (self.buf_pos >= self.buf_len) {
+            if (try self.fillReadBuf(timeout) == 0) return null;
+        }
+        const b = self.read_buf[self.buf_pos];
+        self.buf_pos += 1;
+        return b;
     }
 
     fn transport(self: *TcpTransport) Transport {
@@ -179,15 +212,20 @@ const TcpTransport = struct {
         }
         try w.flush();
 
-        const r = &self.reader.interface;
+        // Absolute deadline over the whole reply line — a drip-feeding peer
+        // cannot reset it per byte.
+        var timeout: Io.Timeout = .none;
+        if (self.read_timeout_ms != 0) {
+            const dl = std.Io.Clock.now(.awake, self.io)
+                .addDuration(std.Io.Duration.fromMilliseconds(@intCast(self.read_timeout_ms)));
+            timeout = .{ .deadline = dl.withClock(.awake) };
+        }
+
         var out: std.ArrayList(u8) = .empty;
         errdefer out.deinit(allocator);
 
         while (true) {
-            var byte_buf: [1]u8 = undefined;
-            const n = try r.readSliceShort(&byte_buf);
-            if (n == 0) break;
-            const b = byte_buf[0];
+            const b = try self.nextByte(timeout) orelse break;
             if (b == '\n') break;
             if (out.items.len >= MaxWireLineBytes) return fsys.refuse("change_too_large", "");
             try out.append(allocator, b);
@@ -208,11 +246,15 @@ const TcpTransport = struct {
 };
 
 pub fn defaultTcpDial(
-    _: ?*anyopaque,
+    dial_ctx: ?*anyopaque,
     allocator: Allocator,
     io: Io,
     remote_url: []const u8,
 ) anyerror!Transport {
+    const opts: TcpDialOptions = if (dial_ctx) |ctx|
+        @as(*const TcpDialOptions, @ptrCast(@alignCast(ctx))).*
+    else
+        .{};
     const parsed = try parseTcpRemoteUrl(remote_url);
     const stream = blk: {
         if (Io.net.IpAddress.parse(parsed.host, parsed.port)) |ip_addr| {
@@ -228,7 +270,34 @@ pub fn defaultTcpDial(
     };
     errdefer stream.close(io);
     const tcp = try TcpTransport.init(allocator, io, stream);
+    tcp.read_timeout_ms = opts.read_timeout_ms;
     return tcp.transport();
+}
+
+/// Parses `--read-timeout=<sec>`; 0 disables protection so it refuses `usage`
+/// (mirroring `flintd --read-timeout=0`).
+fn parseReadTimeoutSeconds(value: []const u8) !u64 {
+    const secs = std.fmt.parseInt(u64, value, 10) catch return fsys.refuse("usage", "");
+    if (secs == 0 or secs > 86400) return fsys.refuse("usage", "");
+    return secs * 1000;
+}
+
+/// Dials the remote; when the dialer is `defaultTcpDial` the `TcpDialOptions`
+/// carry the `--read-timeout` deadline through `dial_ctx`. Injected dialers
+/// keep their own ctx and see no change.
+fn dialRemote(
+    dial_fn: DialFn,
+    dial_ctx: ?*anyopaque,
+    read_timeout_ms: u64,
+    allocator: Allocator,
+    io: Io,
+    remote_url: []const u8,
+) anyerror!Transport {
+    var opts = TcpDialOptions{
+        .read_timeout_ms = if (read_timeout_ms != 0) read_timeout_ms else default_read_timeout_ms,
+    };
+    const ctx: ?*anyopaque = if (dial_fn == defaultTcpDial) @ptrCast(&opts) else dial_ctx;
+    return dial_fn(ctx, allocator, io, remote_url);
 }
 
 /// Computes `HMAC-SHA256(key, "FLINT-SYNC-AUTH/1\x00" || nonce_bytes)` as 64 lowercase hex chars.
@@ -742,7 +811,14 @@ fn parseStreamValue(allocator: Allocator, val: std.json.Value) !store.Stream {
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(allocator);
     try writeJsonValue(&out, allocator, val);
-    return json.parseStream(allocator, out.items);
+    var st = try json.parseStream(allocator, out.items);
+    errdefer st.deinit(allocator);
+    // Remote-supplied names land in the local record and get echoed to the
+    // terminal; refuse anything outside the `[a-z0-9-]{1,32}` contract (#52).
+    if (!ed25519.isValidName(st.name)) {
+        return fsys.refuse("stream_malformed", "invalid stream name");
+    }
+    return st;
 }
 
 fn writeJsonValue(out: *std.ArrayList(u8), allocator: Allocator, val: std.json.Value) !void {
@@ -878,6 +954,7 @@ pub fn cmdClone(
     var name_flag: []const u8 = "default";
     var src_flag: []const u8 = "";
     var auth_key_flag: []const u8 = "";
+    var read_timeout_ms: u64 = 0;
 
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
@@ -917,6 +994,12 @@ pub fn cmdClone(
             if (i + 1 >= args.len or args[i + 1].len == 0) return fsys.refuse("usage", "");
             i += 1;
             auth_key_flag = args[i];
+        } else if (std.mem.startsWith(u8, a, "--read-timeout=")) {
+            read_timeout_ms = try parseReadTimeoutSeconds(a["--read-timeout=".len..]);
+        } else if (std.mem.eql(u8, a, "--read-timeout")) {
+            if (i + 1 >= args.len or args[i + 1].len == 0) return fsys.refuse("usage", "");
+            i += 1;
+            read_timeout_ms = try parseReadTimeoutSeconds(args[i]);
         } else if (std.mem.startsWith(u8, a, "-")) {
             return fsys.refuse("usage", "");
         } else if (remote_flag.len == 0) {
@@ -961,7 +1044,7 @@ pub fn cmdClone(
         return fsys.refuse("store_too_large", "workspaces");
     }
 
-    const transport = try dial_fn(dial_ctx, allocator, io, remote_url);
+    const transport = try dialRemote(dial_fn, dial_ctx, read_timeout_ms, allocator, io, remote_url);
     var client = SyncClient.init(allocator, transport);
     defer client.deinit();
 
@@ -1349,6 +1432,7 @@ pub fn cmdPush(
     var stream_flag: []const u8 = "";
     var ws_flag: []const u8 = "";
     var auth_key_flag: []const u8 = "";
+    var read_timeout_ms: u64 = 0;
 
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
@@ -1381,6 +1465,12 @@ pub fn cmdPush(
             if (i + 1 >= args.len or args[i + 1].len == 0) return fsys.refuse("usage", "");
             i += 1;
             auth_key_flag = args[i];
+        } else if (std.mem.startsWith(u8, a, "--read-timeout=")) {
+            read_timeout_ms = try parseReadTimeoutSeconds(a["--read-timeout=".len..]);
+        } else if (std.mem.eql(u8, a, "--read-timeout")) {
+            if (i + 1 >= args.len or args[i + 1].len == 0) return fsys.refuse("usage", "");
+            i += 1;
+            read_timeout_ms = try parseReadTimeoutSeconds(args[i]);
         } else {
             return fsys.refuse("usage", "");
         }
@@ -1409,7 +1499,7 @@ pub fn cmdPush(
     }
     std.mem.reverse([]const u8, chain_ids.items);
 
-    const transport = try dial_fn(dial_ctx, allocator, io, remote_url);
+    const transport = try dialRemote(dial_fn, dial_ctx, read_timeout_ms, allocator, io, remote_url);
     var client = SyncClient.init(allocator, transport);
     defer client.deinit();
 
@@ -1458,6 +1548,7 @@ pub fn cmdPull(
     var ws_flag: []const u8 = "";
     var auth_key_flag: []const u8 = "";
     var reset_flag = false;
+    var read_timeout_ms: u64 = 0;
 
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
@@ -1492,6 +1583,12 @@ pub fn cmdPull(
             auth_key_flag = args[i];
         } else if (std.mem.eql(u8, a, "--reset")) {
             reset_flag = true;
+        } else if (std.mem.startsWith(u8, a, "--read-timeout=")) {
+            read_timeout_ms = try parseReadTimeoutSeconds(a["--read-timeout=".len..]);
+        } else if (std.mem.eql(u8, a, "--read-timeout")) {
+            if (i + 1 >= args.len or args[i + 1].len == 0) return fsys.refuse("usage", "");
+            i += 1;
+            read_timeout_ms = try parseReadTimeoutSeconds(args[i]);
         } else {
             return fsys.refuse("usage", "");
         }
@@ -1511,7 +1608,7 @@ pub fn cmdPull(
     var loaded = try store.loadStream(allocator, fs, root, target.stream.id);
     defer loaded.deinit(allocator);
 
-    const transport = try dial_fn(dial_ctx, allocator, io, remote_url);
+    const transport = try dialRemote(dial_fn, dial_ctx, read_timeout_ms, allocator, io, remote_url);
     var client = SyncClient.init(allocator, transport);
     defer client.deinit();
 
@@ -2565,4 +2662,33 @@ test "cmdVersion: client spec_rev, remote spec_rev or unannounced, env fallback,
     try std.testing.expectEqualStrings("remote_malformed", fsys.last_refuse.code());
     try std.testing.expectError(error.Refuse, cmdVersion(gpa, std.testing.io, fs, null, null, InProcServer.dial, &server, undefined, &.{"bogus"}));
     try std.testing.expectEqualStrings("usage", fsys.last_refuse.code());
+}
+
+test "parseStreamValue: remote stream names must match [a-z0-9-]{1,32} (#52)" {
+    const gpa = std.testing.allocator;
+    const head = "{\"id\":\"0199de2d-dc00-7000-8000-000000000999\",\"name\":";
+    const tail = ",\"head\":null,\"created\":0,\"forked_from\":null}";
+
+    for ([_][]const u8{
+        "\"../../tmp/evil\"",
+        "\"A\\u001b[2J\"",
+        "\"Upper\"",
+        "\"main stream\"",
+        "\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"",
+    }) |raw_name| {
+        const doc = try std.mem.concat(gpa, u8, &.{ head, raw_name, tail });
+        defer gpa.free(doc);
+        const parsed = try std.json.parseFromSlice(std.json.Value, gpa, doc, .{});
+        defer parsed.deinit();
+        try std.testing.expectError(error.Refuse, parseStreamValue(gpa, parsed.value));
+        try std.testing.expectEqualStrings("stream_malformed", fsys.last_refuse.code());
+    }
+
+    const good_doc = try std.mem.concat(gpa, u8, &.{ head, "\"main-2\"", tail });
+    defer gpa.free(good_doc);
+    const good_parsed = try std.json.parseFromSlice(std.json.Value, gpa, good_doc, .{});
+    defer good_parsed.deinit();
+    var st = try parseStreamValue(gpa, good_parsed.value);
+    defer st.deinit(gpa);
+    try std.testing.expectEqualStrings("main-2", st.name);
 }
