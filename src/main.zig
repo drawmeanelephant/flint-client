@@ -12,6 +12,7 @@ pub const parser = @import("parser/parser.zig");
 pub const render = @import("parser/render.zig");
 pub const workspace = @import("workspace.zig");
 pub const sign = @import("sign.zig");
+pub const merge = @import("merge.zig");
 
 /// Runtime context for executing a `flint` command.
 /// Allows injecting an in-memory filesystem, custom writers, clock/RNG, and environment in tests.
@@ -249,6 +250,19 @@ pub fn runWithContext(ctx: Context, args: []const []const u8) u8 {
         return 0;
     }
 
+    if (std.mem.eql(u8, verb, "fork")) {
+        merge.cmdFork(ctx.allocator, ctx.fs, root, uuid_gen, ctx.stdout, sub) catch |err| {
+            return handleErr(err, ctx.stdout);
+        };
+        return 0;
+    }
+
+    if (std.mem.eql(u8, verb, "merge")) {
+        return merge.cmdMerge(ctx.allocator, ctx.fs, root, uuid_gen, ctx.env_flint_sign_key, ctx.stdout, sub) catch |err| {
+            return handleErr(err, ctx.stdout);
+        };
+    }
+
     if (std.mem.eql(u8, verb, "keygen")) {
         ed25519.cmdKeygen(ctx.allocator, ctx.fs, root, uuid_gen, sub, ctx.stdout) catch |err| {
             return handleErr(err, ctx.stdout);
@@ -276,6 +290,7 @@ test {
     _ = render;
     _ = workspace;
     _ = sign;
+    _ = merge;
 }
 
 const TestHarness = struct {
@@ -1985,5 +2000,559 @@ test "commit, log, and key resolution refusals" {
     defer gpa.free(log_raw);
     try std.testing.expect(std.mem.indexOf(u8, log_raw, key_seed) == null);
 }
+
+fn opsSliceEqual(a: []const store.Op, b: []const store.Op) bool {
+    if (a.len != b.len) return false;
+    for (a, b) |oa, ob| {
+        if (!std.mem.eql(u8, oa.type, ob.type) or
+            !std.mem.eql(u8, oa.atom_id, ob.atom_id) or
+            !std.mem.eql(u8, oa.kind, ob.kind) or
+            !std.mem.eql(u8, oa.new_name, ob.new_name) or
+            !merge.spansEqual(oa.new_span, ob.new_span) or
+            !std.mem.eql(u8, oa.new_hash, ob.new_hash) or
+            !std.mem.eql(u8, oa.new_sig_hash, ob.new_sig_hash) or
+            !std.mem.eql(u8, oa.old_hash, ob.old_hash))
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+fn parseStoredAtomValue(allocator: Allocator, val: std.json.Value) !store.StoredAtom {
+    if (val != .object) return error.InvalidJson;
+    const obj = val.object;
+    const id = try allocator.dupe(u8, obj.get("id").?.string);
+    errdefer allocator.free(id);
+    const kind = try allocator.dupe(u8, obj.get("kind").?.string);
+    errdefer allocator.free(kind);
+    const name = try allocator.dupe(u8, obj.get("name").?.string);
+    errdefer allocator.free(name);
+    const hash = try allocator.dupe(u8, obj.get("hash").?.string);
+    errdefer allocator.free(hash);
+    const sig_hash = if (obj.get("sig_hash")) |sh|
+        (if (sh == .string) try allocator.dupe(u8, sh.string) else "")
+    else
+        "";
+    errdefer if (sig_hash.len > 0) allocator.free(sig_hash);
+    const sp = try json.parseSpanValue(allocator, obj.get("span").?);
+    errdefer sp.deinit(allocator);
+    return .{
+        .id = id,
+        .kind = kind,
+        .name = name,
+        .hash = hash,
+        .sig_hash = sig_hash,
+        .span = sp,
+        .origin = "",
+    };
+}
+
+test "merge scenarios (20 fixtures) and into<->from symmetry" {
+    const gpa = std.testing.allocator;
+    var host_fs = fsys.HostFS.init(std.testing.io);
+    const hfs = host_fs.fs();
+
+    const entries = try hfs.list(gpa, "testdata/merge");
+    defer fsys.FS.freeDirEntries(gpa, entries);
+
+    var scenario_count: usize = 0;
+    for (entries) |e| {
+        if (e.is_dir or !std.mem.endsWith(u8, e.name, ".json")) continue;
+        scenario_count += 1;
+
+        const path = try std.fmt.allocPrint(gpa, "testdata/merge/{s}", .{e.name});
+        defer gpa.free(path);
+        const raw = try hfs.readFile(gpa, path, store.MaxFileReadBytes);
+        defer gpa.free(raw);
+
+        var parsed = try std.json.parseFromSlice(std.json.Value, gpa, raw, .{});
+        defer parsed.deinit();
+        const root = parsed.value.object;
+        const sc_name = root.get("name").?.string;
+
+        const base_arr = root.get("base_atoms").?.array.items;
+        var base_atoms: std.ArrayList(store.StoredAtom) = .empty;
+        defer {
+            for (base_atoms.items) |a| a.deinit(gpa);
+            base_atoms.deinit(gpa);
+        }
+        for (base_arr) |item| {
+            try base_atoms.append(gpa, try parseStoredAtomValue(gpa, item));
+        }
+
+        const into_arr = root.get("into").?.array.items;
+        var into_changes: std.ArrayList([]store.Op) = .empty;
+        defer {
+            for (into_changes.items) |ops| store.freeOps(gpa, ops);
+            into_changes.deinit(gpa);
+        }
+        for (into_arr) |ch_val| {
+            var ops_list: std.ArrayList(store.Op) = .empty;
+            errdefer {
+                for (ops_list.items) |op| op.deinit(gpa);
+                ops_list.deinit(gpa);
+            }
+            for (ch_val.array.items) |op_val| {
+                try ops_list.append(gpa, try json.parseOpValue(gpa, op_val));
+            }
+            try into_changes.append(gpa, try ops_list.toOwnedSlice(gpa));
+        }
+
+        const from_arr = root.get("from").?.array.items;
+        var from_changes: std.ArrayList([]store.Op) = .empty;
+        defer {
+            for (from_changes.items) |ops| store.freeOps(gpa, ops);
+            from_changes.deinit(gpa);
+        }
+        for (from_arr) |ch_val| {
+            var ops_list: std.ArrayList(store.Op) = .empty;
+            errdefer {
+                for (ops_list.items) |op| op.deinit(gpa);
+                ops_list.deinit(gpa);
+            }
+            for (ch_val.array.items) |op_val| {
+                try ops_list.append(gpa, try json.parseOpValue(gpa, op_val));
+            }
+            try from_changes.append(gpa, try ops_list.toOwnedSlice(gpa));
+        }
+
+        const want_obj = root.get("want").?.object;
+        const want_clean = want_obj.get("clean").?.bool;
+        var want_ops: std.ArrayList(store.Op) = .empty;
+        defer {
+            for (want_ops.items) |op| op.deinit(gpa);
+            want_ops.deinit(gpa);
+        }
+        for (want_obj.get("ops").?.array.items) |op_val| {
+            try want_ops.append(gpa, try json.parseOpValue(gpa, op_val));
+        }
+        store.sortOps(want_ops.items);
+
+        const want_conflicts = want_obj.get("conflicts").?.array.items;
+
+        const res = try merge.mergeOps(gpa, base_atoms.items, into_changes.items, from_changes.items);
+        defer res.deinit(gpa);
+
+        try std.testing.expectEqual(want_clean, res.clean);
+        try std.testing.expect(opsSliceEqual(res.ops, want_ops.items));
+        try std.testing.expectEqual(want_conflicts.len, res.conflicts.len);
+        for (res.conflicts, 0..) |c, idx| {
+            const wc = want_conflicts[idx].object;
+            try std.testing.expectEqualStrings(wc.get("name").?.string, c.name);
+            try std.testing.expectEqualStrings(wc.get("type").?.string, c.type);
+        }
+
+        // Equal add: verify `into`'s Atom ID is kept when `into`'s changes + merge ops are applied.
+        if (std.mem.eql(u8, sc_name, "equal_add")) {
+            var atoms_by_id = std.StringHashMap(store.StoredAtom).init(gpa);
+            defer {
+                var it = atoms_by_id.iterator();
+                while (it.next()) |kv| {
+                    gpa.free(kv.key_ptr.*);
+                    kv.value_ptr.deinit(gpa);
+                }
+                atoms_by_id.deinit();
+            }
+            for (into_changes.items) |ops| {
+                try store.applyOpsToAtomMap(gpa, &atoms_by_id, ops, false);
+            }
+            try store.applyOpsToAtomMap(gpa, &atoms_by_id, res.ops, true);
+            try std.testing.expectEqual(@as(usize, 1), atoms_by_id.count());
+            const into_add_id = into_changes.items[0][0].atom_id;
+            try std.testing.expect(atoms_by_id.contains(into_add_id));
+        }
+
+        // Symmetry: swapping `into` and `from` must give the exact same set of conflict (name, type) pairs.
+        const rev = try merge.mergeOps(gpa, base_atoms.items, from_changes.items, into_changes.items);
+        defer rev.deinit(gpa);
+        try std.testing.expectEqual(res.clean, rev.clean);
+        try std.testing.expectEqual(res.conflicts.len, rev.conflicts.len);
+        for (res.conflicts, rev.conflicts) |cf, cr| {
+            try std.testing.expectEqualStrings(cf.name, cr.name);
+            try std.testing.expectEqualStrings(cf.type, cr.type);
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 20), scenario_count);
+}
+
+test "fork, init --stream replay, clean merge, re-merge, verify --all, and src_behind guard" {
+    const gpa = std.testing.allocator;
+    var h = try TestHarness.init(gpa);
+    defer h.deinit();
+    h.env_sign_key = rfc8032_seed_hex;
+    const mfs = h.mem.fs();
+
+    const base_src = "package calc\n\nfunc X() int {\n\treturn 1\n}\n\nfunc Y() int {\n\treturn 2\n}\n";
+    try mfs.writeFileSafe(gpa, "/host/SRCA/calc.go", base_src);
+    try mfs.writeFileSafe(gpa, "/host/SRCB/calc.go", base_src);
+
+    // 1. Init workspace `a` on stream `main`.
+    {
+        const res = try h.runCmd(&.{ "init", "--name=a", "--src=/host/SRCA" });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+    }
+
+    // Refusal: `fork_empty` when `main` has no head yet.
+    {
+        const res = try h.runCmd(&.{ "fork", "main", "feature" });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 1), res.rc);
+        try std.testing.expectEqualStrings("flint: refuse fork_empty\n", res.out);
+    }
+
+    // Refusal: `stream_missing` on fork.
+    {
+        const res = try h.runCmd(&.{ "fork", "nope", "feature" });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 1), res.rc);
+        try std.testing.expectEqualStrings("flint: refuse stream_missing nope\n", res.out);
+    }
+
+    // Stage and commit base on `a` (`main`).
+    {
+        const res = try h.runCmd(&.{ "add", "/host/SRCA" });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+    }
+    {
+        const res = try h.runCmd(&.{ "commit", "-m", "base" });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+    }
+
+    var base_head: []u8 = &.{};
+    defer if (base_head.len > 0) gpa.free(base_head);
+    var main_id: []u8 = &.{};
+    defer if (main_id.len > 0) gpa.free(main_id);
+    {
+        var idx = try store.loadStoreIndex(gpa, mfs, h.root);
+        defer idx.deinit();
+        const main_st = idx.streamByName("main").?;
+        base_head = try gpa.dupe(u8, main_st.head.?);
+        main_id = try gpa.dupe(u8, main_st.id);
+    }
+
+    // 2. Fork `main` -> `feature`.
+    h.now += 5;
+    {
+        const res = try h.runCmd(&.{ "fork", "main", "feature" });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+        const want = try std.fmt.allocPrint(gpa, "flint: fork ok stream=feature head={s}\n", .{base_head});
+        defer gpa.free(want);
+        try std.testing.expectEqualStrings(want, res.out);
+    }
+
+    // Refusal: `stream_exists` when forking to an existing stream name.
+    {
+        const res = try h.runCmd(&.{ "fork", "main", "feature" });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 1), res.rc);
+        try std.testing.expectEqualStrings("flint: refuse stream_exists feature\n", res.out);
+    }
+
+    // Verify `forked_from` in `feature`'s stream record.
+    {
+        var idx = try store.loadStoreIndex(gpa, mfs, h.root);
+        defer idx.deinit();
+        const feat_st = idx.streamByName("feature").?;
+        try std.testing.expectEqualStrings(base_head, feat_st.head.?);
+        try std.testing.expect(feat_st.forked_from != null);
+        try std.testing.expectEqualStrings(main_id, feat_st.forked_from.?.stream);
+        try std.testing.expectEqualStrings(base_head, feat_st.forked_from.?.change);
+    }
+
+    // 3. `init --name=b --src=/host/SRCB --stream=feature` replays Ops and matches `a`'s Atom table.
+    h.now += 5;
+    {
+        const res = try h.runCmd(&.{ "init", "--name=b", "--src=/host/SRCB", "--stream=feature" });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+        try std.testing.expectEqualStrings("flint: init ok ws=b stream=feature atoms=2 replayed=1\n", res.out);
+    }
+
+    {
+        const atoms_a = try store.loadWorkspaceAtoms(gpa, mfs, h.root, "a");
+        defer store.freeStoredAtoms(gpa, atoms_a);
+        const atoms_b = try store.loadWorkspaceAtoms(gpa, mfs, h.root, "b");
+        defer store.freeStoredAtoms(gpa, atoms_b);
+        try std.testing.expectEqual(@as(usize, 2), atoms_a.len);
+        try std.testing.expectEqual(@as(usize, 2), atoms_b.len);
+        for (atoms_a, atoms_b) |aa, ab| {
+            try std.testing.expectEqualStrings(aa.id, ab.id);
+            try std.testing.expectEqualStrings(aa.kind, ab.kind);
+            try std.testing.expectEqualStrings(aa.name, ab.name);
+            try std.testing.expectEqualStrings(aa.hash, ab.hash);
+            try std.testing.expectEqualStrings(aa.sig_hash, ab.sig_hash);
+            try std.testing.expect(merge.spansEqual(aa.span, ab.span));
+        }
+    }
+
+    // 4. Machine B edits `X` and commits on `feature`.
+    try mfs.writeFileSafe(
+        gpa,
+        "/host/SRCB/calc.go",
+        "package calc\n\nfunc X() int {\n\treturn 10\n}\n\nfunc Y() int {\n\treturn 2\n}\n",
+    );
+    h.now += 5;
+    {
+        const res = try h.runCmd(&.{ "add", "/host/SRCB" });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+    }
+    {
+        const res = try h.runCmd(&.{ "commit", "--ws=b", "-m", "feat" });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+    }
+
+    // 5. Machine A edits `Y`. Before committing, test `stage_dirty` refusal on `merge`.
+    try mfs.writeFileSafe(
+        gpa,
+        "/host/SRCA/calc.go",
+        "package calc\n\nfunc X() int {\n\treturn 1\n}\n\nfunc Y() int {\n\treturn 20\n}\n",
+    );
+    h.now += 5;
+    {
+        const res = try h.runCmd(&.{ "add", "/host/SRCA" });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+    }
+    {
+        const res = try h.runCmd(&.{ "merge", "feature" });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 1), res.rc);
+        try std.testing.expectEqualStrings("flint: refuse stage_dirty\n", res.out);
+    }
+    {
+        const res = try h.runCmd(&.{ "commit", "--ws=a", "-m", "main" });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+    }
+
+    // Refusal: `stream_missing` on merge.
+    {
+        const res = try h.runCmd(&.{ "merge", "--ws=a", "no-such-stream" });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 1), res.rc);
+        try std.testing.expectEqualStrings("flint: refuse stream_missing no-such-stream\n", res.out);
+    }
+
+    var pre_merge_main_head: []u8 = &.{};
+    defer if (pre_merge_main_head.len > 0) gpa.free(pre_merge_main_head);
+    var feat_head: []u8 = &.{};
+    defer if (feat_head.len > 0) gpa.free(feat_head);
+    {
+        var idx = try store.loadStoreIndex(gpa, mfs, h.root);
+        defer idx.deinit();
+        pre_merge_main_head = try gpa.dupe(u8, idx.streamByName("main").?.head.?);
+        feat_head = try gpa.dupe(u8, idx.streamByName("feature").?.head.?);
+    }
+
+    // 6. Clean merge of `feature` into `main` (workspace `a` resolved unambiguously without `--ws`).
+    h.now += 5;
+    {
+        const res = try h.runCmd(&.{ "merge", "feature" });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+        try std.testing.expect(std.mem.startsWith(u8, res.out, "flint: merge ok conflicts=0 ops=1 id="));
+        try std.testing.expect(std.mem.endsWith(u8, res.out, "\nflint: merge src not materialized files=1\n"));
+    }
+
+    // Verify the signed merge Change on `main` (`parent == pre_merge_main_head`, `merged == feat_head`).
+    {
+        const loaded = try store.loadStream(gpa, mfs, h.root, main_id);
+        defer loaded.deinit(gpa);
+        try std.testing.expectEqual(@as(usize, 3), loaded.changes.len);
+        const merge_change = loaded.changes[2];
+        try std.testing.expectEqualStrings(merge_change.id, loaded.stream.head.?);
+        try std.testing.expectEqualStrings(pre_merge_main_head, merge_change.parent.?);
+        try std.testing.expectEqualStrings(feat_head, merge_change.merged.?);
+        try std.testing.expect(try ed25519.verifyChange(gpa, &merge_change));
+    }
+
+    // Re-merge `feature` -> `flint: merge up to date`, nothing written.
+    const main_log_path = try store.streamLogPath(gpa, h.root, main_id);
+    defer gpa.free(main_log_path);
+    const main_log_before = try mfs.readFile(gpa, main_log_path, store.MaxFileReadBytes);
+    defer gpa.free(main_log_before);
+    {
+        const res = try h.runCmd(&.{ "merge", "feature" });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+        try std.testing.expectEqualStrings("flint: merge up to date\n", res.out);
+    }
+    const main_log_after = try mfs.readFile(gpa, main_log_path, store.MaxFileReadBytes);
+    defer gpa.free(main_log_after);
+    try std.testing.expectEqualStrings(main_log_before, main_log_after);
+
+    // `verify --all` verifies all 4 Changes across `main` and `feature`.
+    {
+        const res = try h.runCmd(&.{ "verify", "--all" });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+        var line_count: usize = 0;
+        var it = std.mem.splitScalar(u8, std.mem.trimEnd(u8, res.out, "\n"), '\n');
+        while (it.next()) |line| {
+            line_count += 1;
+            try std.testing.expect(std.mem.endsWith(u8, line, " sig: verified"));
+        }
+        try std.testing.expectEqual(@as(usize, 4), line_count);
+    }
+
+    // 7. `src_behind` guard: `calc.X` in workspace `a` is marked `origin: merge`,
+    // while `/host/SRCA/calc.go` still has the old `X() { return 1 }` on disk.
+    {
+        const atoms_after_merge = try store.loadWorkspaceAtoms(gpa, mfs, h.root, "a");
+        defer store.freeStoredAtoms(gpa, atoms_after_merge);
+        var found_merge_origin = false;
+        for (atoms_after_merge) |a| {
+            if (std.mem.eql(u8, a.name, "calc.X") and std.mem.eql(u8, a.origin, "merge")) {
+                found_merge_origin = true;
+            }
+        }
+        try std.testing.expect(found_merge_origin);
+    }
+
+    {
+        const res = try h.runCmd(&.{ "add", "/host/SRCA" });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 1), res.rc);
+        try std.testing.expectEqualStrings("flint: refuse src_behind calc.go\n", res.out);
+    }
+    const stage_a = try store.workspaceStagePath(gpa, h.root, "a");
+    defer gpa.free(stage_a);
+    try std.testing.expect(!mfs.exists(gpa, stage_a));
+
+    // Once `/host/SRCA/calc.go` is updated on disk so `X` matches the merged hash,
+    // `add` succeeds and clears `origin: merge`!
+    try mfs.writeFileSafe(
+        gpa,
+        "/host/SRCA/calc.go",
+        "package calc\n\nfunc X() int {\n\treturn 10\n}\n\nfunc Y() int {\n\treturn 20\n}\n",
+    );
+    {
+        const res = try h.runCmd(&.{ "add", "/host/SRCA" });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+        try std.testing.expectEqualStrings("flint: add files=1 new=0 modified=0 deleted=0 unchanged=2\n", res.out);
+    }
+    {
+        const atoms_cleared = try store.loadWorkspaceAtoms(gpa, mfs, h.root, "a");
+        defer store.freeStoredAtoms(gpa, atoms_cleared);
+        for (atoms_cleared) |a| {
+            try std.testing.expectEqualStrings("", a.origin);
+        }
+    }
+}
+
+test "conflicting merge writes MERGE.json and leaves history and ATOMS.jsonl byte-identical" {
+    const gpa = std.testing.allocator;
+    var h = try TestHarness.init(gpa);
+    defer h.deinit();
+    h.env_sign_key = rfc8032_seed_hex;
+    const mfs = h.mem.fs();
+
+    const base_src = "package calc\n\nfunc X() int {\n\treturn 1\n}\n\nfunc Y() int {\n\treturn 2\n}\n";
+    try mfs.writeFileSafe(gpa, "/host/SRCA/calc.go", base_src);
+    try mfs.writeFileSafe(gpa, "/host/SRCB/calc.go", base_src);
+
+    for ([_][]const []const u8{
+        &.{ "init", "--name=a", "--src=/host/SRCA" },
+        &.{ "add", "/host/SRCA" },
+        &.{ "commit", "-m", "base" },
+        &.{ "fork", "main", "feature" },
+        &.{ "init", "--name=b", "--src=/host/SRCB", "--stream=feature" },
+    }) |cmd| {
+        const res = try h.runCmd(cmd);
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+    }
+
+    // Machine B edits `X` to return 10.
+    try mfs.writeFileSafe(
+        gpa,
+        "/host/SRCB/calc.go",
+        "package calc\n\nfunc X() int {\n\treturn 10\n}\n\nfunc Y() int {\n\treturn 2\n}\n",
+    );
+    h.now += 5;
+    for ([_][]const []const u8{
+        &.{ "add", "/host/SRCB" },
+        &.{ "commit", "--ws=b", "-m", "feat" },
+    }) |cmd| {
+        const res = try h.runCmd(cmd);
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+    }
+
+    // Machine A edits `X` to return 99.
+    try mfs.writeFileSafe(
+        gpa,
+        "/host/SRCA/calc.go",
+        "package calc\n\nfunc X() int {\n\treturn 99\n}\n\nfunc Y() int {\n\treturn 2\n}\n",
+    );
+    h.now += 5;
+    for ([_][]const []const u8{
+        &.{ "add", "/host/SRCA" },
+        &.{ "commit", "--ws=a", "-m", "main" },
+    }) |cmd| {
+        const res = try h.runCmd(cmd);
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+    }
+
+    var idx = try store.loadStoreIndex(gpa, mfs, h.root);
+    defer idx.deinit();
+    const main_id = idx.streamByName("main").?.id;
+    const rec_path = try store.streamRecordPath(gpa, h.root, main_id);
+    defer gpa.free(rec_path);
+    const log_path = try store.streamLogPath(gpa, h.root, main_id);
+    defer gpa.free(log_path);
+    const atoms_path = try store.workspaceAtomsPath(gpa, h.root, "a");
+    defer gpa.free(atoms_path);
+
+    const rec_before = try mfs.readFile(gpa, rec_path, store.MaxFileReadBytes);
+    defer gpa.free(rec_before);
+    const log_before = try mfs.readFile(gpa, log_path, store.MaxFileReadBytes);
+    defer gpa.free(log_before);
+    const atoms_before = try mfs.readFile(gpa, atoms_path, store.MaxFileReadBytes);
+    defer gpa.free(atoms_before);
+
+    {
+        const res = try h.runCmd(&.{ "merge", "feature" });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 2), res.rc);
+        try std.testing.expectEqualStrings(
+            "flint: merge conflict atom=calc.X type=concurrent_modify\nflint: merge conflicts=1\n",
+            res.out,
+        );
+    }
+
+    const rec_after = try mfs.readFile(gpa, rec_path, store.MaxFileReadBytes);
+    defer gpa.free(rec_after);
+    const log_after = try mfs.readFile(gpa, log_path, store.MaxFileReadBytes);
+    defer gpa.free(log_after);
+    const atoms_after = try mfs.readFile(gpa, atoms_path, store.MaxFileReadBytes);
+    defer gpa.free(atoms_after);
+
+    try std.testing.expectEqualStrings(rec_before, rec_after);
+    try std.testing.expectEqualStrings(log_before, log_after);
+    try std.testing.expectEqualStrings(atoms_before, atoms_after);
+
+    const merge_path = try store.workspaceMergePath(gpa, h.root, "a");
+    defer gpa.free(merge_path);
+    const merge_bytes = try mfs.readFile(gpa, merge_path, store.MaxFileReadBytes);
+    defer gpa.free(merge_bytes);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, gpa, merge_bytes, .{});
+    defer parsed.deinit();
+    const conflicts = parsed.value.object.get("conflicts").?.array.items;
+    try std.testing.expectEqual(@as(usize, 1), conflicts.len);
+    try std.testing.expectEqualStrings("calc.X", conflicts[0].object.get("name").?.string);
+    try std.testing.expectEqualStrings("concurrent_modify", conflicts[0].object.get("type").?.string);
+}
+
 
 
