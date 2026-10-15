@@ -1698,6 +1698,24 @@ test "torn line, store bounds, stale head, and guest store portability" {
         try std.testing.expect(std.mem.indexOf(u8, res.out, "flint: refuse stream_torn") != null);
     }
 
+    // 1b. Empty line in ATOMS.jsonl -> refuse atom_malformed; empty line in STAGE.jsonl -> refuse stage_malformed.
+    try mfs.writeFileSafe(gpa, "/host/FLINT/ws/w/ATOMS.jsonl", "\n");
+    {
+        const res = try h.runCmd(&.{"status"});
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 1), res.rc);
+        try std.testing.expectEqualStrings("flint: refuse atom_malformed\n", res.out);
+    }
+    try mfs.writeFileSafe(gpa, "/host/FLINT/ws/w/ATOMS.jsonl", "");
+    try mfs.writeFileSafe(gpa, "/host/FLINT/ws/w/STAGE.jsonl", "\n");
+    {
+        const res = try h.runCmd(&.{"status"});
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 1), res.rc);
+        try std.testing.expectEqualStrings("flint: refuse stage_malformed\n", res.out);
+    }
+    try mfs.remove(gpa, "/host/FLINT/ws/w/STAGE.jsonl");
+
     // 2. File size bound (> 4 MiB) -> refuse store_too_large file.
     const big = try gpa.alloc(u8, store.MaxFileReadBytes + 16);
     defer gpa.free(big);
