@@ -100,7 +100,7 @@ pub fn cmdInit(
 
     const src_dir = try fsys.cleanPath(allocator, raw_src);
     defer allocator.free(src_dir);
-    if (!fs.exists(allocator, src_dir)) {
+    if (!fs.exists(allocator, src_dir) or !fs.isDir(allocator, src_dir)) {
         return fsys.refuse("src_missing", "");
     }
 

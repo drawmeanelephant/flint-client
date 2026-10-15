@@ -276,6 +276,10 @@ const ZScan = struct {
             } else if (std.mem.eql(u8, t.text, "{")) {
                 if (depth != 0) continue;
                 const prev = self.at(idx - 1);
+                if (zigtok.zkindOf(prev) == .ident and std.mem.eql(u8, prev.text, "error")) {
+                    idx = try self.skipBalanced(idx);
+                    continue;
+                }
                 if (zigtok.zkindOf(prev) == .ident and isZAnonBrace(prev.text)) {
                     return self.unsupported(prev.start);
                 }
