@@ -233,6 +233,25 @@ fn inTargets(rel: []const u8, targets: []const AddTarget) bool {
     return false;
 }
 
+fn hasTrackedUnderPrefix(
+    atoms_by_file: *const std.StringHashMap(std.ArrayList(store.StoredAtom)),
+    prefix: []const u8,
+) bool {
+    var it = atoms_by_file.iterator();
+    while (it.next()) |kv| {
+        if (kv.value_ptr.items.len == 0) continue;
+        const rel = kv.key_ptr.*;
+        if (prefix.len == 0 or std.mem.eql(u8, rel, prefix)) return true;
+        if (std.mem.startsWith(u8, rel, prefix) and
+            rel.len > prefix.len and
+            rel[prefix.len] == '/')
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
 fn walkSourceFiles(
     allocator: Allocator,
     fs: FS,
@@ -344,17 +363,17 @@ pub fn cmdAdd(
         const rel = relToSrc(ws.src, p) orelse {
             return fsys.refuse("src_missing", p);
         };
-        if (fs.list(allocator, p)) |entries| {
-            defer FS.freeDirEntries(allocator, entries);
-            try targets.append(allocator, .{ .rel_prefix = rel, .is_dir = true });
-            try walkSourceFiles(allocator, fs, ws.src, p, entries, &disk_files_map);
-            continue;
-        } else |_| {}
-
-        if (parser.forPath(rel) == null) {
-            continue;
-        }
         if (fs.exists(allocator, p)) {
+            if (fs.isDir(allocator, p)) {
+                const entries = try fs.list(allocator, p);
+                defer FS.freeDirEntries(allocator, entries);
+                try targets.append(allocator, .{ .rel_prefix = rel, .is_dir = true });
+                try walkSourceFiles(allocator, fs, ws.src, p, entries, &disk_files_map);
+                continue;
+            }
+            if (parser.forPath(rel) == null) {
+                continue;
+            }
             try targets.append(allocator, .{ .rel_prefix = rel, .is_dir = false });
             if (!disk_files_map.contains(rel)) {
                 const rel_dup = try allocator.dupe(u8, rel);
@@ -363,13 +382,33 @@ pub fn cmdAdd(
             }
             continue;
         }
-        // A disappeared single file that was tracked in ATOMS.jsonl deletes its Atoms.
+
+        // `p` does not exist on disk.
+        // 1. If `p` is the workspace's `src` root itself (`rel.len == 0`), register it
+        //    as a directory target when atoms are tracked (so missing files are reported
+        //    as deleted), or refuse `src_missing` if no atoms are tracked.
+        if (rel.len == 0) {
+            if (existing_atoms.len > 0) {
+                try targets.append(allocator, .{ .rel_prefix = rel, .is_dir = true });
+                continue;
+            }
+            return fsys.refuse("src_missing", p);
+        }
+
+        // 2. A disappeared single file that was tracked in ATOMS.jsonl deletes its Atoms.
         if (atoms_by_file.get(rel)) |list| {
             if (list.items.len > 0) {
                 try targets.append(allocator, .{ .rel_prefix = rel, .is_dir = false });
                 continue;
             }
         }
+
+        // 3. A disappeared directory that had tracked files in ATOMS.jsonl deletes its Atoms.
+        if (hasTrackedUnderPrefix(&atoms_by_file, rel)) {
+            try targets.append(allocator, .{ .rel_prefix = rel, .is_dir = true });
+            continue;
+        }
+
         return fsys.refuse("src_missing", p);
     }
 
