@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Sensitive security report
+    url: https://github.com/drawmeanelephant/flint-client/security
+    about: Use private reporting or arrange a private channel with the owner.

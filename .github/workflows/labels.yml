@@ -1,0 +1,58 @@
+name: Synchronize labels
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Preview only; uncheck to create/update the configured labels
+        type: boolean
+        default: true
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  labels:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        env:
+          DRY_RUN: ${{ inputs.dry_run }}
+        with:
+          script: |
+            const fs = require('fs');
+            const labels = JSON.parse(fs.readFileSync('.github/labels.json', 'utf8'));
+            if (!Array.isArray(labels) || labels.length > 100) throw new Error('Invalid labels list');
+            const names = new Set();
+            for (const label of labels) {
+              if (!/^[a-zA-Z0-9:-]{1,50}$/.test(label.name) ||
+                  !/^[0-9a-f]{6}$/i.test(label.color) ||
+                  typeof label.description !== 'string' ||
+                  label.description.length > 100 || names.has(label.name)) {
+                throw new Error('Invalid or duplicate label');
+              }
+              names.add(label.name);
+            }
+            for (const label of labels) {
+              core.info(`${process.env.DRY_RUN === 'true' ? 'Would synchronize' : 'Synchronizing'} ${label.name}`);
+              if (process.env.DRY_RUN === 'true') continue;
+              const args = {...context.repo, name: label.name};
+              try {
+                await github.rest.issues.getLabel(args);
+                await github.rest.issues.updateLabel({...args, color: label.color, description: label.description});
+              } catch (error) {
+                if (error.status !== 404) throw error;
+                await github.rest.issues.createLabel({...context.repo, ...label});
+              }
+            }
+            await core.summary.addHeading('Label synchronization')
+              .addRaw(`${labels.length} labels; dry run: ${process.env.DRY_RUN}. No labels are deleted.`)
+              .write();

@@ -1,0 +1,110 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "23 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    name: Checks (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
+        with:
+          version: "0.17.0"
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: .zig-cache
+          key: zig-0.17.0-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('build.zig*', 'src/**/*.zig') }}
+          restore-keys: zig-0.17.0-${{ runner.os }}-${{ runner.arch }}-
+      - name: Documented build, lint, tests, and CLI QA
+        run: python3 tools/check.py
+      - name: Publish quality and timing summary
+        if: always()
+        run: |
+          {
+            if test -f build/reports/quality.md; then
+              cat build/reports/quality.md
+            fi
+            if test -f build/reports/timings.json; then
+              printf '\n## Command timings\n```json\n'
+              cat build/reports/timings.json
+              printf '\n```\n'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: reports-${{ matrix.os }}
+          path: build/reports/
+          retention-days: 30
+          if-no-files-found: error
+
+  coverage:
+    name: Linux coverage
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
+        with:
+          version: "0.17.0"
+      - name: Install coverage tool
+        run: sudo apt-get update && sudo apt-get install --yes kcov
+      - name: Compile and run instrumented tests
+        run: |
+          mkdir -p build
+          zig test src/main.zig --test-no-exec -femit-bin=build/flint-tests
+          kcov --include-path="$PWD/src" build/coverage build/flint-tests
+          python3 tools/check_coverage.py build/coverage --minimum 70
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: coverage
+          path: build/coverage/
+          retention-days: 30
+
+  stability:
+    name: Scheduled test stability
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
+        with:
+          version: "0.17.0"
+      - run: python3 tools/check.py --phase test --repeat-tests 3
+      - run: zig build -Doptimize=ReleaseSafe && python3 tools/benchmark.py --seconds 5
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: stability
+          path: build/reports/
+          retention-days: 30

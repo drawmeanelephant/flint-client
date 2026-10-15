@@ -1,0 +1,5 @@
+# Runtime, contracts, signing, and all repository automation require owner review.
+* @drawmeanelephant
+/src/ed25519.zig @drawmeanelephant
+/src/sync.zig @drawmeanelephant
+/.github/ @drawmeanelephant

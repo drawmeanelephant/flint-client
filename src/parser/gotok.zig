@@ -26,11 +26,11 @@ pub const LexError = struct {
 
 pub fn isGoKeyword(text: []const u8) bool {
     const keywords = [_][]const u8{
-        "break",       "case",   "chan",   "const",   "continue",
-        "default",     "defer",  "else",   "fallthrough", "for",
-        "func",        "go",     "goto",   "if",      "import",
-        "interface",   "map",    "package", "range",  "return",
-        "select",      "struct", "switch", "type",    "var",
+        "break",     "case",   "chan",    "const",       "continue",
+        "default",   "defer",  "else",    "fallthrough", "for",
+        "func",      "go",     "goto",    "if",          "import",
+        "interface", "map",    "package", "range",       "return",
+        "select",    "struct", "switch",  "type",        "var",
     };
     for (keywords) |kw| {
         if (std.mem.eql(u8, text, kw)) return true;
@@ -284,8 +284,7 @@ fn matchGoOp(rem: []const u8) usize {
     if (rem.len >= 1) {
         const c = rem[0];
         switch (c) {
-            '+', '-', '*', '/', '%', '&', '|', '^', '<', '>', '=', '!', '~',
-            '(', ')', '[', ']', '{', '}', ',', '.', ':' => return 1,
+            '+', '-', '*', '/', '%', '&', '|', '^', '<', '>', '=', '!', '~', '(', ')', '[', ']', '{', '}', ',', '.', ':' => return 1,
             else => {},
         }
     }

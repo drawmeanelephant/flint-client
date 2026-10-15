@@ -3189,7 +3189,7 @@ test "M106e auth challenge, allow-author, forked stream clone/push, and loopback
     const ServerAcceptTask = struct {
         fn run(srv: *sync.InProcServer, tcp_listener: *Io.net.Server, io: Io) void {
             const conn = tcp_listener.accept(io) catch return;
-            srv.serveNetStream( std.heap.page_allocator, io, conn);
+            srv.serveNetStream(std.heap.page_allocator, io, conn);
         }
     };
     const thr = try std.Thread.spawn(.{}, ServerAcceptTask.run, .{ &server, &tcp_srv, std.testing.io });
@@ -3560,8 +3560,6 @@ test "re-clone never overwrites a divergent stream (#28); fork + pull --reset + 
         try std.testing.expectEqualStrings(d1_id, mc.merged.?);
     }
 }
-
-
 
 test "clone creates a missing --src dir; a file path still refuses src_missing (#32)" {
     const gpa = std.testing.allocator;
