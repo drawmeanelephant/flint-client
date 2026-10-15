@@ -963,6 +963,25 @@ pub fn writeWorkspaceConfig(allocator: Allocator, fs: FS, root: []const u8, ws: 
     try fs.writeFileSafe(allocator, p, data);
 }
 
+/// WriteWorkspaceRemote writes `ws/<name>/REMOTE.json` via `writeFileSafe`.
+pub fn writeWorkspaceRemote(allocator: Allocator, fs: FS, root: []const u8, ws_name: []const u8, rc: RemoteConfig) !void {
+    const p = try workspaceRemotePath(allocator, root, ws_name);
+    defer allocator.free(p);
+    const data = try json.marshalRemoteConfigLine(allocator, rc);
+    defer allocator.free(data);
+    try fs.writeFileSafe(allocator, p, data);
+}
+
+/// LoadWorkspaceRemote reads `ws/<name>/REMOTE.json` if present, or returns `null`.
+pub fn loadWorkspaceRemote(allocator: Allocator, fs: FS, root: []const u8, ws_name: []const u8) !?RemoteConfig {
+    const p = try workspaceRemotePath(allocator, root, ws_name);
+    defer allocator.free(p);
+    if (!fs.exists(allocator, p)) return null;
+    const raw = try fs.readFile(allocator, p, MaxFileReadBytes);
+    defer allocator.free(raw);
+    return try json.parseRemoteConfig(allocator, raw);
+}
+
 /// CheckStaleHead re-reads the Stream record (rolling forward if the log moved)
 /// and refuses with `stale_head` if the head no longer equals `expected_head`.
 pub fn checkStaleHead(
