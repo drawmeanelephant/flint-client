@@ -183,10 +183,9 @@ pub fn runWithContext(ctx: Context, args: []const []const u8) u8 {
     }
 
     if (std.mem.eql(u8, verb, "parse-corpus")) {
-        render.cmdParseCorpus(ctx.allocator, ctx.fs, sub, ctx.stdout) catch |err| {
+        return render.cmdParseCorpus(ctx.allocator, ctx.fs, sub, ctx.stdout) catch |err| {
             return handleErr(err, ctx.stdout);
         };
-        return 0;
     }
 
     const is_known_store_verb = std.mem.eql(u8, verb, "keygen") or
@@ -984,7 +983,8 @@ test "Full corpus (50 .go + 50 .zig = 100 files, 245 atoms) matches MANIFEST.jso
         try std.testing.expect((zig_kinds.get(k) orelse 0) >= 3);
     }
 
-    // Verify `flint parse-corpus testdata/corpus` matches MANIFEST.json byte-for-byte
+    // Verify `flint parse-corpus testdata/corpus` writes testdata/corpus.OUT matching MANIFEST.json byte-for-byte
+    // and prints the spec summary line.
     var out_w: Io.Writer.Allocating = .init(gpa);
     defer out_w.deinit();
     var err_w: Io.Writer.Allocating = .init(gpa);
@@ -996,9 +996,43 @@ test "Full corpus (50 .go + 50 .zig = 100 files, 245 atoms) matches MANIFEST.jso
         .stdout = &out_w.writer,
         .stderr = &err_w.writer,
     };
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, "testdata/corpus.OUT") catch {};
     const rc = runWithContext(ctx, &.{ "parse-corpus", "testdata/corpus" });
     try std.testing.expectEqual(@as(u8, 0), rc);
-    try std.testing.expectEqualStrings(want_rendered.items, out_w.written());
+    try std.testing.expectEqualStrings("flint: parse files=100 atoms=245 parse_errors=0\n", out_w.written());
+    const out_bytes = try fs.readFile(gpa, "testdata/corpus.OUT", store.MaxFileReadBytes);
+    defer gpa.free(out_bytes);
+    try std.testing.expectEqualStrings(want_rendered.items, out_bytes);
+
+    // Verify `flint parse-corpus testdata/corpus/refuse` counts parse_errors without aborting
+    // and returns non-zero exit code.
+    var refuse_out_w: Io.Writer.Allocating = .init(gpa);
+    defer refuse_out_w.deinit();
+    const refuse_ctx = Context{
+        .allocator = gpa,
+        .io = std.testing.io,
+        .fs = fs,
+        .stdout = &refuse_out_w.writer,
+        .stderr = &err_w.writer,
+    };
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, "testdata/corpus/refuse.OUT") catch {};
+    const refuse_rc = runWithContext(refuse_ctx, &.{ "parse-corpus", "testdata/corpus/refuse" });
+    try std.testing.expectEqual(@as(u8, 1), refuse_rc);
+    try std.testing.expectEqualStrings("flint: parse files=2 atoms=0 parse_errors=2\n", refuse_out_w.written());
+
+    // Verify missing/extra args refuse with `usage` (exit code 2).
+    var bad_out_w: Io.Writer.Allocating = .init(gpa);
+    defer bad_out_w.deinit();
+    const bad_ctx = Context{
+        .allocator = gpa,
+        .io = std.testing.io,
+        .fs = fs,
+        .stdout = &bad_out_w.writer,
+        .stderr = &err_w.writer,
+    };
+    const bad_rc = runWithContext(bad_ctx, &.{"parse-corpus"});
+    try std.testing.expectEqual(@as(u8, 2), bad_rc);
+    try std.testing.expectEqualStrings("flint: refuse usage\n", bad_out_w.written());
 }
 
 test "Canonical token streams match all 6 testdata/canon/*.txt fixtures and scientific notation" {
@@ -1180,9 +1214,13 @@ test "CLI parse-corpus on Zig files" {
     const res = try h.runCmd(&.{ "parse-corpus", "/corpus" });
     defer gpa.free(res.out);
     try std.testing.expectEqual(@as(u8, 0), res.rc);
+    try std.testing.expectEqualStrings("flint: parse files=1 atoms=6 parse_errors=0\n", res.out);
+
+    const out_bytes = try mfs.readFile(gpa, "/corpus.OUT", store.MaxFileReadBytes);
+    defer gpa.free(out_bytes);
 
     var line_count: usize = 0;
-    var it = std.mem.splitScalar(u8, std.mem.trimEnd(u8, res.out, "\n"), '\n');
+    var it = std.mem.splitScalar(u8, std.mem.trimEnd(u8, out_bytes, "\n"), '\n');
     while (it.next()) |line| {
         if (line.len == 0) continue;
         line_count += 1;
