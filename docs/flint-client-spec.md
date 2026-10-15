@@ -51,9 +51,9 @@ match the Go implementation exactly — the lines below are observed from
 | `merge <from> [--ws=<n>]` | Net-effect 3-way merge on Ops. `flint: merge up to date`; on success `flint: merge ok conflicts=0 ops=<n> id=<id>` followed by `flint: merge src not materialized files=<n>`; conflicts print one `flint: merge conflict atom=<name> type=<t>` per conflict plus `flint: merge conflicts=<n>` (exit 2). Refuses `stage_dirty` when the workspace stage is non-empty. |
 | `parse-corpus <dir>` | Dev/conformance verb: parse every `.go`/`.zig` file, write `<dir>.OUT` = `parser.Render(atoms)` via the crash-safe write (**contractual — the corpus gate compares it byte-for-byte**), print `flint: parse files=<n> atoms=<m> parse_errors=<e>`. Keep — it is how the corpus gate runs. |
 | `keygen [--name=<n>]` | **New, host-only.** Generate a 32-byte seed, store it, print the derived public key hex. See §2.3. |
-| `clone <remote> --stream=<name\|id> [--name=<ws>] --src=<dir> [--auth-key=<file>]` | **M106e remote verb.** Initialize store, follow `forked_from` chains (`open` + `read`), re-verify every Change (`sig_invalid` aborts before writing), replay atoms into `ws/<name>/ATOMS.jsonl`, write `WORKSPACE.json` and `REMOTE.json`. Prints `flint: clone ok stream=<name> changes=<n>`. |
+| `clone <remote> --stream=<name\|id> [--name=<ws>] --src=<dir> [--auth-key=<file>]` | **M106e remote verb.** Initialize store, follow `forked_from` chains (`open` + `read`), re-verify every Change (`sig_invalid` aborts before writing), replay atoms into `ws/<name>/ATOMS.jsonl`, write `WORKSPACE.json` and `REMOTE.json`. Prints `flint: clone ok stream=<name> changes=<n>`. Never silently overwrites a stream that already exists locally: re-clone is allowed only as a fast-forward (the local log is a verified prefix of the remote log — the missing suffix is appended, the log is never rewritten). Refuses `fork_needed` when local and remote history diverge, `stream_exists` when local is strictly ahead or the record conflicts. |
 | `push [--remote=<url>] [--stream=<s>] [--ws=<n>] [--auth-key=<file>]` | **M106e remote verb.** `create` any streams in the `forked_from` ancestry missing on the server, then `append` the client's unsent suffix. Prints `flint: push ok stream=<s> changes=<n>` or `flint: push up to date`. |
-| `pull [--remote=<url>] [--stream=<s>] [--ws=<n>] [--auth-key=<file>]` | **M106e remote verb.** `open`/`read after=<head>`, re-verify every pulled Change (`sig_invalid` aborts and writes nothing), append raw lines, roll local stream record forward. Prints `flint: pull ok stream=<s> changes=<n>` or `flint: pull up to date`. Refuses `fork_needed` when remote head diverges from local head. |
+| `pull [--remote=<url>] [--stream=<s>] [--ws=<n>] [--auth-key=<file>] [--reset]` | **M106e remote verb.** `open`/`read after=<head>`, re-verify every pulled Change (`sig_invalid` aborts and writes nothing), append raw lines, roll local stream record forward. Prints `flint: pull ok stream=<s> changes=<n>` or `flint: pull up to date`. Refuses `fork_needed` when remote head diverges from local head. With `--reset`: fetch and verify the whole remote log, append the remote Changes the local log lacks, and roll the local head to the remote head — refusing `fork_needed` unless the local head stays reachable through another stream's ancestry (i.e. `flint fork <stream> <aside>` first). Divergent local Changes remain in the log as unreachable sibling lines. Prints `flint: pull reset stream=<s> changes=<n> head=<id>`. Recovery journey: `fork` → `pull --reset` → `merge <aside>` → `push`. |
 
 Remote resolution for `push`/`pull`/`clone`: `--remote <url>` flag →
 `FLINT_REMOTE` env var → `ws/<name>/REMOTE.json` (`{"remote":"tcp://<host>:<port>","stream":"<id>"}`) →
@@ -79,7 +79,11 @@ vocabulary is part of the contract. The full set used for these verbs:
 `syntax`, `duplicate_decl`, `change_missing`, `change_malformed`,
 `atom_malformed`, `stage_malformed`, `ws_malformed`, `store_too_large`,
 `store_not_found`, `key_exists`, `clock_unset` (unreachable on a POSIX
-host — keep the name). Use the same name the Go implementation uses for
+host — keep the name), and for the sync verbs `fork_needed`,
+`remote_missing`, `remote_malformed`, `secret_malformed` plus the
+wire-refusal names of the FLINT-SYNC/1 spec (`proto_version`,
+`auth_required`, `auth_failed`, `author_not_allowed`, …), which print
+through unchanged. Use the same name the Go implementation uses for
 the same condition.
 
 ## 2. Deltas from ADR 0049 (everything else is identical)

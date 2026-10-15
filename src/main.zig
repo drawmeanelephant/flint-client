@@ -89,7 +89,7 @@ fn printHelp(w: *Io.Writer) void {
         \\  merge <from> [--ws=<n>]
         \\  clone <remote> --stream=<s> --name=<n> --src=<dir> [--auth-key=<file>]
         \\  push [--remote=<url>] [--stream=<s>] [--ws=<n>] [--auth-key=<file>]
-        \\  pull [--remote=<url>] [--stream=<s>] [--ws=<n>] [--auth-key=<file>]
+        \\  pull [--remote=<url>] [--stream=<s>] [--ws=<n>] [--auth-key=<file>] [--reset]
         \\  parse-corpus <dir>
         \\  keygen [--name=<n>]
         \\
@@ -3176,6 +3176,285 @@ test "M106e auth challenge, allow-author, forked stream clone/push, and loopback
     }
 }
 
+test "re-clone never overwrites a divergent stream (#28); fork + pull --reset + merge + push recovers (#29)" {
+    const gpa = std.testing.allocator;
 
+    var srv_mem = try fsys.MemFS.init(gpa);
+    defer srv_mem.deinit();
+    const srv_fs = srv_mem.fs();
+    try srv_fs.mkdir(gpa, "/srv/FLINT/streams");
+
+    var server = sync.InProcServer{
+        .allocator = gpa,
+        .fs = srv_fs,
+        .store_root = "/srv/FLINT",
+    };
+
+    var ha = try TestHarness.init(gpa);
+    defer ha.deinit();
+    ha.env_sign_key = rfc8032_seed_hex;
+    ha.sync_dial = sync.InProcServer.dial;
+    ha.sync_dial_ctx = &server;
+    const fsa = ha.mem.fs();
+
+    const base_src = "package calc\n\nfunc X() int {\n\treturn 1\n}\n\nfunc Y() int {\n\treturn 2\n}\n";
+    try fsa.writeFileSafe(gpa, "/host/SRCA/calc.go", base_src);
+
+    // A: init, commit c1 (base), push -> server main = [c1].
+    for ([_][]const []const u8{
+        &.{ "init", "--name=a", "--src=/host/SRCA" },
+        &.{ "add", "/host/SRCA" },
+        &.{ "commit", "-m", "c1" },
+        &.{ "push", "--remote=tcp://127.0.0.1:4748" },
+    }) |cmd| {
+        const res = try ha.runCmd(cmd);
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+    }
+
+    // B: clone main -> [c1].
+    var hb = try TestHarness.init(gpa);
+    defer hb.deinit();
+    hb.env_sign_key = rfc8032_seed_hex;
+    hb.sync_dial = sync.InProcServer.dial;
+    hb.sync_dial_ctx = &server;
+    const fsb = hb.mem.fs();
+    try fsb.writeFileSafe(gpa, "/host/SRCB/calc.go", base_src);
+    {
+        const res = try hb.runCmd(&.{
+            "clone",
+            "tcp://127.0.0.1:4748",
+            "--stream=main",
+            "--name=b",
+            "--src=/host/SRCB",
+        });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+        try std.testing.expectEqualStrings("flint: clone ok stream=main changes=1\n", res.out);
+    }
+
+    var idx_b = try store.loadStoreIndex(gpa, fsb, hb.root);
+    defer idx_b.deinit();
+    const main_id = try gpa.dupe(u8, idx_b.streamByName("main").?.id);
+    defer gpa.free(main_id);
+    const b_rec_p = try store.streamRecordPath(gpa, hb.root, main_id);
+    defer gpa.free(b_rec_p);
+    const b_log_p = try store.streamLogPath(gpa, hb.root, main_id);
+    defer gpa.free(b_log_p);
+
+    // A: modify X, commit c2, push -> server main = [c1, c2].
+    try fsa.writeFileSafe(
+        gpa,
+        "/host/SRCA/calc.go",
+        "package calc\n\nfunc X() int {\n\treturn 10\n}\n\nfunc Y() int {\n\treturn 2\n}\n",
+    );
+    ha.now += 5;
+    for ([_][]const []const u8{
+        &.{ "add", "/host/SRCA" },
+        &.{ "commit", "-m", "c2" },
+        &.{"push"},
+    }) |cmd| {
+        const res = try ha.runCmd(cmd);
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+    }
+
+    // Re-clone while local is strictly behind is a fast-forward and is allowed:
+    // the existing log is a verified prefix, so only the missing suffix appends.
+    try fsb.mkdir(gpa, "/host/SRCB2");
+    {
+        const res = try hb.runCmd(&.{
+            "clone",
+            "tcp://127.0.0.1:4748",
+            "--stream=main",
+            "--name=b2",
+            "--src=/host/SRCB2",
+        });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+        try std.testing.expectEqualStrings("flint: clone ok stream=main changes=2\n", res.out);
+    }
+    {
+        const b_log = try fsb.readFile(gpa, b_log_p, store.MaxFileReadBytes);
+        defer gpa.free(b_log);
+        const b_lines = try store.readJSONLLines(gpa, b_log);
+        defer gpa.free(b_lines);
+        try std.testing.expectEqual(@as(usize, 2), b_lines.len);
+    }
+
+    // B: modify Y, commit divergent d1 -> local main = [c1, c2, d1].
+    try fsb.writeFileSafe(
+        gpa,
+        "/host/SRCB/calc.go",
+        "package calc\n\nfunc X() int {\n\treturn 1\n}\n\nfunc Y() int {\n\treturn 999\n}\n",
+    );
+    hb.now += 10;
+    for ([_][]const []const u8{
+        &.{ "add", "--ws=b", "/host/SRCB" },
+        &.{ "commit", "--ws=b", "-m", "d1" },
+    }) |cmd| {
+        const res = try hb.runCmd(cmd);
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+    }
+    const d1_id = blk: {
+        const loaded = try store.loadStream(gpa, fsb, hb.root, main_id);
+        defer loaded.deinit(gpa);
+        break :blk try gpa.dupe(u8, loaded.stream.head.?);
+    };
+    defer gpa.free(d1_id);
+
+    // A: modify X again, commit c3, push -> server main = [c1, c2, c3].
+    try fsa.writeFileSafe(
+        gpa,
+        "/host/SRCA/calc.go",
+        "package calc\n\nfunc X() int {\n\treturn 20\n}\n\nfunc Y() int {\n\treturn 2\n}\n",
+    );
+    ha.now += 5;
+    for ([_][]const []const u8{
+        &.{ "add", "/host/SRCA" },
+        &.{ "commit", "-m", "c3" },
+        &.{"push"},
+    }) |cmd| {
+        const res = try ha.runCmd(cmd);
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+    }
+    const c3_id = blk: {
+        var idx_a = try store.loadStoreIndex(gpa, fsa, ha.root);
+        defer idx_a.deinit();
+        const a_main = idx_a.streamByName("main").?;
+        break :blk try gpa.dupe(u8, a_main.head.?);
+    };
+    defer gpa.free(c3_id);
+
+    // Issue #28: re-clone over a divergent local stream refuses and destroys nothing.
+    const rec_before = try fsb.readFile(gpa, b_rec_p, store.MaxFileReadBytes);
+    defer gpa.free(rec_before);
+    const log_before = try fsb.readFile(gpa, b_log_p, store.MaxFileReadBytes);
+    defer gpa.free(log_before);
+    try fsb.mkdir(gpa, "/host/SRCB3");
+    {
+        const res = try hb.runCmd(&.{
+            "clone",
+            "tcp://127.0.0.1:4748",
+            "--stream=main",
+            "--name=b3",
+            "--src=/host/SRCB3",
+        });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 1), res.rc);
+        try std.testing.expectEqualStrings("flint: refuse fork_needed\n", res.out);
+
+        const rec_after = try fsb.readFile(gpa, b_rec_p, store.MaxFileReadBytes);
+        defer gpa.free(rec_after);
+        const log_after = try fsb.readFile(gpa, b_log_p, store.MaxFileReadBytes);
+        defer gpa.free(log_after);
+        try std.testing.expectEqualStrings(rec_before, rec_after);
+        try std.testing.expectEqualStrings(log_before, log_after);
+
+        const ws3_cfg = try store.workspaceConfigPath(gpa, hb.root, "b3");
+        defer gpa.free(ws3_cfg);
+        try std.testing.expect(!fsb.exists(gpa, ws3_cfg));
+    }
+
+    // Issue #29: pull refuses fork_needed; --reset refuses until d1 is forked aside.
+    {
+        const res = try hb.runCmd(&.{ "pull", "--ws=b" });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 1), res.rc);
+        try std.testing.expectEqualStrings("flint: refuse fork_needed\n", res.out);
+    }
+    {
+        const res = try hb.runCmd(&.{ "pull", "--ws=b", "--reset" });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 1), res.rc);
+        try std.testing.expectEqualStrings("flint: refuse fork_needed\n", res.out);
+        const log_now = try fsb.readFile(gpa, b_log_p, store.MaxFileReadBytes);
+        defer gpa.free(log_now);
+        try std.testing.expectEqualStrings(log_before, log_now);
+    }
+    {
+        const res = try hb.runCmd(&.{ "fork", "main", "b-work" });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+        const want = try std.fmt.allocPrint(gpa, "flint: fork ok stream=b-work head={s}\n", .{d1_id});
+        defer gpa.free(want);
+        try std.testing.expectEqualStrings(want, res.out);
+    }
+    {
+        const res = try hb.runCmd(&.{ "pull", "--ws=b", "--reset" });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+        const want = try std.fmt.allocPrint(gpa, "flint: pull reset stream=main changes=1 head={s}\n", .{c3_id});
+        defer gpa.free(want);
+        try std.testing.expectEqualStrings(want, res.out);
+
+        // Local log now holds the remote suffix; d1 survives as a sibling line
+        // reachable through b-work's fork point.
+        const loaded = try store.loadStream(gpa, fsb, hb.root, main_id);
+        defer loaded.deinit(gpa);
+        try std.testing.expectEqualStrings(c3_id, loaded.stream.head.?);
+        try std.testing.expectEqual(@as(usize, 4), loaded.changes.len);
+        try std.testing.expectEqualStrings(d1_id, loaded.changes[2].id);
+        try std.testing.expectEqualStrings(c3_id, loaded.changes[3].id);
+    }
+
+    // merge b-work into main: clean (d1 touched Y, c3 touched X); merge Change's
+    // parent is the remote head so push fast-forwards the server.
+    {
+        const res = try hb.runCmd(&.{ "merge", "--ws=b", "b-work" });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+        try std.testing.expect(std.mem.startsWith(u8, res.out, "flint: merge ok conflicts=0 ops=1 id="));
+    }
+    const merge_id = blk: {
+        const loaded = try store.loadStream(gpa, fsb, hb.root, main_id);
+        defer loaded.deinit(gpa);
+        break :blk try gpa.dupe(u8, loaded.stream.head.?);
+    };
+    defer gpa.free(merge_id);
+    {
+        const res = try hb.runCmd(&.{ "push", "--ws=b" });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+        try std.testing.expectEqualStrings("flint: push ok stream=main changes=1\n", res.out);
+    }
+
+    // A pulls the merge Change; every store verifies green.
+    {
+        const res = try ha.runCmd(&.{ "pull", "--ws=a" });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+        try std.testing.expectEqualStrings("flint: pull ok stream=main changes=1\n", res.out);
+    }
+    for ([_]*TestHarness{ ha, hb }) |h| {
+        const res = try h.runCmd(&.{ "verify", "--all" });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+    }
+    {
+        var vout: Io.Writer.Allocating = .init(gpa);
+        defer vout.deinit();
+        const vrc = try ed25519.cmdVerify(gpa, srv_fs, server.store_root, &.{"--all"}, &vout.writer);
+        try std.testing.expectEqual(@as(u8, 0), vrc);
+    }
+
+    // Server log is [c1, c2, c3, M]; M parents the remote head and merges d1.
+    {
+        const s_log_p = try store.streamLogPath(gpa, server.store_root, main_id);
+        defer gpa.free(s_log_p);
+        const s_log = try srv_fs.readFile(gpa, s_log_p, store.MaxFileReadBytes);
+        defer gpa.free(s_log);
+        const s_lines = try store.readJSONLLines(gpa, s_log);
+        defer gpa.free(s_lines);
+        try std.testing.expectEqual(@as(usize, 4), s_lines.len);
+        var mc = try json.parseChange(gpa, s_lines[3]);
+        defer mc.deinit(gpa);
+        try std.testing.expectEqualStrings(merge_id, mc.id);
+        try std.testing.expectEqualStrings(c3_id, mc.parent.?);
+        try std.testing.expectEqualStrings(d1_id, mc.merged.?);
+    }
+}
 
 
