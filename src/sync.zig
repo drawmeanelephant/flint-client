@@ -10,6 +10,7 @@ const store = @import("store.zig");
 const json = @import("json.zig");
 const ed25519 = @import("ed25519.zig");
 const sign = @import("sign.zig");
+const merge = @import("merge.zig");
 
 pub const ProtoVersion = "FLINT-SYNC/1";
 pub const AuthDomain = "FLINT-SYNC-AUTH/1\x00";
@@ -52,6 +53,12 @@ fn readStreamRawLines(allocator: Allocator, fs: FS, root: []const u8, stream_id:
 fn freeRawLines(allocator: Allocator, lines: [][]u8) void {
     for (lines) |l| allocator.free(l);
     allocator.free(lines);
+}
+
+fn forkOriginEql(a: ?store.ForkOrigin, b: ?store.ForkOrigin) bool {
+    if (a == null and b == null) return true;
+    if (a == null or b == null) return false;
+    return std.mem.eql(u8, a.?.stream, b.?.stream) and std.mem.eql(u8, a.?.change, b.?.change);
 }
 
 fn isLowerHex(s: []const u8, exact_len: usize) bool {
@@ -884,6 +891,10 @@ pub fn cmdClone(
     const StreamPayload = struct {
         record: store.Stream,
         raw_lines: [][]u8,
+        /// When `existed` is true, the local log is a verified prefix of
+        /// `raw_lines` and only `raw_lines[append_from..]` is appended.
+        append_from: usize = 0,
+        existed: bool = false,
     };
     var payloads: std.ArrayList(StreamPayload) = .empty;
     defer {
@@ -898,9 +909,6 @@ pub fn cmdClone(
     var new_streams_count: usize = 0;
 
     for (chain.items) |st| {
-        if (idx.streamByID(st.id) == null) {
-            new_streams_count += 1;
-        }
         const first_parent: ?[]const u8 = if (st.forked_from) |ff| ff.change else null;
         const lines = try fetchAndVerifyStreamChanges(allocator, &client, st, null, first_parent);
         errdefer {
@@ -927,11 +935,66 @@ pub fn cmdClone(
             }
         }
 
-        total_new_changes += lines.len;
-        try payloads.append(allocator, .{
-            .record = st,
-            .raw_lines = lines,
-        });
+        // Spec §4: a local stream is never silently overwritten. Re-clone is
+        // allowed only as a fast-forward: the existing local log must be a
+        // verified prefix of the remote log, and the record must agree.
+        if (idx.streamByID(st.id)) |local_rec| {
+            if (!std.mem.eql(u8, local_rec.name, st.name) or
+                !forkOriginEql(local_rec.forked_from, st.forked_from))
+            {
+                return fsys.refuse("stream_exists", local_rec.name);
+            }
+            const local_lines = try readStreamRawLines(allocator, fs, root, st.id);
+            defer freeRawLines(allocator, local_lines);
+
+            var is_prefix = local_lines.len <= lines.len;
+            if (is_prefix) {
+                for (local_lines, 0..) |ll, li| {
+                    if (!std.mem.eql(u8, ll, lines[li])) {
+                        is_prefix = false;
+                        break;
+                    }
+                }
+            }
+            if (!is_prefix) {
+                const local_changes = try store.readStreamChanges(allocator, fs, root, st.id);
+                defer store.freeChanges(allocator, local_changes);
+                var remote_in_local = false;
+                if (st.head) |rh| {
+                    if (local_rec.forked_from) |ff| {
+                        if (std.mem.eql(u8, rh, ff.change)) remote_in_local = true;
+                    }
+                    for (local_changes) |c| {
+                        if (std.mem.eql(u8, c.id, rh)) {
+                            remote_in_local = true;
+                            break;
+                        }
+                    }
+                }
+                if (remote_in_local) {
+                    // Local is strictly ahead: re-clone would roll the head back.
+                    return fsys.refuse("stream_exists", local_rec.name);
+                }
+                return fsys.refuse("fork_needed", "");
+            }
+            total_new_changes += lines.len - local_lines.len;
+            try payloads.append(allocator, .{
+                .record = st,
+                .raw_lines = lines,
+                .append_from = local_lines.len,
+                .existed = true,
+            });
+        } else {
+            if (idx.streamByName(st.name) != null) {
+                return fsys.refuse("stream_exists", st.name);
+            }
+            new_streams_count += 1;
+            total_new_changes += lines.len;
+            try payloads.append(allocator, .{
+                .record = st,
+                .raw_lines = lines,
+            });
+        }
     }
 
     if (idx.streams.items.len + new_streams_count > MaxStreams) {
@@ -953,15 +1016,27 @@ pub fn cmdClone(
     try fs.mkdir(allocator, keys_dir);
 
     for (payloads.items) |p| {
-        if (p.raw_lines.len > 0) {
+        const log_path = try store.streamLogPath(allocator, root, p.record.id);
+        defer allocator.free(log_path);
+        if (p.existed) {
+            // Fast-forward re-clone: append only the missing suffix so the
+            // local Change log stays append-only and never rewritten.
+            if (p.raw_lines.len > p.append_from) {
+                var log_buf: std.ArrayList(u8) = .empty;
+                defer log_buf.deinit(allocator);
+                for (p.raw_lines[p.append_from..]) |line| {
+                    try log_buf.appendSlice(allocator, line);
+                    try log_buf.append(allocator, '\n');
+                }
+                try fs.appendSync(allocator, log_path, log_buf.items);
+            }
+        } else if (p.raw_lines.len > 0) {
             var log_buf: std.ArrayList(u8) = .empty;
             defer log_buf.deinit(allocator);
             for (p.raw_lines) |line| {
                 try log_buf.appendSlice(allocator, line);
                 try log_buf.append(allocator, '\n');
             }
-            const log_path = try store.streamLogPath(allocator, root, p.record.id);
-            defer allocator.free(log_path);
             try fs.writeFileSafe(allocator, log_path, log_buf.items);
         }
         try store.writeStreamRecord(allocator, fs, root, p.record);
@@ -1276,6 +1351,7 @@ pub fn cmdPull(
     var stream_flag: []const u8 = "";
     var ws_flag: []const u8 = "";
     var auth_key_flag: []const u8 = "";
+    var reset_flag = false;
 
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
@@ -1308,6 +1384,8 @@ pub fn cmdPull(
             if (i + 1 >= args.len or args[i + 1].len == 0) return fsys.refuse("usage", "");
             i += 1;
             auth_key_flag = args[i];
+        } else if (std.mem.eql(u8, a, "--reset")) {
+            reset_flag = true;
         } else {
             return fsys.refuse("usage", "");
         }
@@ -1346,6 +1424,21 @@ pub fn cmdPull(
             try stdout.writeAll("flint: pull up to date\n");
             return;
         }
+    }
+
+    if (reset_flag) {
+        return pullResetToRemote(
+            allocator,
+            fs,
+            root,
+            &client,
+            &idx,
+            &loaded,
+            remote_rec,
+            remote_url,
+            target.ws_name,
+            stdout,
+        );
     }
 
     // If `remote_head` is already in local stream changes (or equals `forked_from.change`),
@@ -1436,6 +1529,161 @@ pub fn cmdPull(
     }
 
     try stdout.print("flint: pull ok stream={s} changes={d}\n", .{ loaded.stream.name, fetched_lines.len });
+}
+
+/// Implements `flint pull --reset` — the divergence-recovery path for the spec §4
+/// journey "pull → merge → push". The local stream's `.jsonl` is append-only, so
+/// reset fetches the full remote log, appends every remote Change the local log
+/// lacks, then rolls the record head to the remote head. Changes the remote does
+/// not have remain in the log as unreachable sibling lines (harmless: the
+/// roll-forward rule only examines the last line's parent, and ancestor walks go
+/// through `parent`/`merged` ids, not log order).
+///
+/// Safety: moving the head to the remote head orphans the local head, so reset
+/// refuses `fork_needed` unless that head stays reachable through another
+/// stream's ancestry — i.e. the user already ran `flint fork <stream> <aside>`.
+/// The journey is then `merge <aside>` (the merge Change gets `parent` = remote
+/// head and pushes cleanly) → `push`.
+fn pullResetToRemote(
+    allocator: Allocator,
+    fs: FS,
+    root: []const u8,
+    client: *SyncClient,
+    idx: *store.StoreIndex,
+    loaded: *store.LoadedStream,
+    remote_rec: store.Stream,
+    remote_url: []const u8,
+    ws_name: ?[]const u8,
+    stdout: *Io.Writer,
+) !void {
+    const remote_head = remote_rec.head orelse {
+        try stdout.writeAll("flint: pull up to date\n");
+        return;
+    };
+    const local_head = loaded.stream.head;
+    if (store.optStrEql(local_head, remote_head)) {
+        try stdout.writeAll("flint: pull up to date\n");
+        return;
+    }
+
+    // The two records must describe the same stream origin.
+    if (!forkOriginEql(loaded.stream.forked_from, remote_rec.forked_from)) {
+        return fsys.refuse("stream_malformed", "forked_from mismatch");
+    }
+
+    // Fetch and verify the whole remote log; the first Change's parent is the
+    // fork point for a forked stream, else null.
+    const first_parent: ?[]const u8 = if (remote_rec.forked_from) |ff| ff.change else null;
+    const remote_lines = try fetchAndVerifyStreamChanges(allocator, client, remote_rec, null, first_parent);
+    defer {
+        for (remote_lines) |l| allocator.free(l);
+        allocator.free(remote_lines);
+    }
+
+    // The remote record head must equal the last log line (or `forked_from.change`
+    // on a forked stream whose own log is still empty).
+    if (remote_lines.len > 0) {
+        var last_c = try json.parseChange(allocator, remote_lines[remote_lines.len - 1]);
+        defer last_c.deinit(allocator);
+        if (!std.mem.eql(u8, last_c.id, remote_head)) {
+            return fsys.refuse("stream_malformed", "head mismatch");
+        }
+    } else if (remote_rec.forked_from) |ff| {
+        if (!std.mem.eql(u8, remote_head, ff.change)) {
+            return fsys.refuse("stream_malformed", "fork head mismatch");
+        }
+    } else {
+        return fsys.refuse("stream_malformed", "non-null head on empty stream");
+    }
+
+    var remote_changes: std.ArrayList(store.Change) = .empty;
+    defer {
+        for (remote_changes.items) |*c| c.deinit(allocator);
+        remote_changes.deinit(allocator);
+    }
+    var remote_ids = std.StringHashMap(void).init(allocator);
+    defer remote_ids.deinit();
+    for (remote_lines) |line| {
+        const c = try json.parseChange(allocator, line);
+        try remote_changes.append(allocator, c);
+        try remote_ids.put(c.id, {});
+    }
+    if (remote_rec.forked_from) |ff| try remote_ids.put(ff.change, {});
+
+    var local_ids = std.StringHashMap(void).init(allocator);
+    defer local_ids.deinit();
+    for (loaded.changes) |c| try local_ids.put(c.id, {});
+    if (loaded.stream.forked_from) |ff| try local_ids.put(ff.change, {});
+
+    var missing: std.ArrayList([]const u8) = .empty;
+    defer missing.deinit(allocator);
+    for (remote_changes.items, 0..) |c, ri| {
+        if (!local_ids.contains(c.id)) {
+            try missing.append(allocator, remote_lines[ri]);
+        }
+    }
+
+    // Orphan guard: rolling the head to `remote_head` unroots the local head.
+    // Refuse unless another stream's ancestry reaches it (fork or merge).
+    if (local_head) |lh| {
+        if (!remote_ids.contains(lh)) {
+            const all_changes = try store.loadAllStreamChanges(allocator, fs, root, idx);
+            defer store.freeChanges(allocator, all_changes);
+            var changes_by_id = std.StringHashMap(store.Change).init(allocator);
+            defer changes_by_id.deinit();
+            for (all_changes) |c| try changes_by_id.put(c.id, c);
+
+            var preserved = false;
+            for (idx.streams.items) |*other| {
+                if (std.mem.eql(u8, other.id, loaded.stream.id)) continue;
+                var anc = try merge.ancestorSet(allocator, other.head, &changes_by_id);
+                const hit = anc.contains(lh);
+                anc.deinit();
+                if (hit) {
+                    preserved = true;
+                    break;
+                }
+            }
+            if (!preserved) {
+                return fsys.refuse("fork_needed", "");
+            }
+        }
+    }
+
+    if (idx.change_count + missing.items.len > store.MaxChanges) {
+        return fsys.refuse("store_too_large", "changes");
+    }
+
+    var append_buf: std.ArrayList(u8) = .empty;
+    defer append_buf.deinit(allocator);
+    for (missing.items) |line| {
+        try append_buf.appendSlice(allocator, line);
+        try append_buf.append(allocator, '\n');
+    }
+    const log_path = try store.streamLogPath(allocator, root, loaded.stream.id);
+    defer allocator.free(log_path);
+    if (append_buf.items.len > 0) {
+        try fs.appendSync(allocator, log_path, append_buf.items);
+    }
+
+    const updated_stream = store.Stream{
+        .id = loaded.stream.id,
+        .name = loaded.stream.name,
+        .head = remote_head,
+        .forked_from = loaded.stream.forked_from,
+        .created = loaded.stream.created,
+    };
+    try store.writeStreamRecord(allocator, fs, root, updated_stream);
+
+    if (ws_name) |wn| {
+        const rc = store.RemoteConfig{
+            .remote = remote_url,
+            .stream = loaded.stream.id,
+        };
+        try store.writeWorkspaceRemote(allocator, fs, root, wn, rc);
+    }
+
+    try stdout.print("flint: pull reset stream={s} changes={d} head={s}\n", .{ loaded.stream.name, missing.items.len, remote_head });
 }
 
 /// In-process `FLINT-SYNC/1` server fixture (`flintd` equivalent) for conformance testing
