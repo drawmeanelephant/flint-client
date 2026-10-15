@@ -1197,6 +1197,45 @@ test "Refusals (anon_ret.zig offset 14, bad.go offset 29) and usingnamespace ign
     defer parser.freeAtoms(gpa, atoms);
     try std.testing.expectEqual(@as(usize, 1), atoms.len);
     try std.testing.expectEqualStrings("legacy.kept", atoms[0].name);
+
+    // Go ungrouped `const x int` (missing `= value`) refuses `syntax`.
+    var const_perr: ?parser.ParseErrorInfo = null;
+    try std.testing.expectError(
+        error.ParseFailed,
+        parser.parseFile(gpa, "bad_const.go", "package p\nconst x int\n", null, &const_perr),
+    );
+    try std.testing.expect(const_perr != null);
+    try std.testing.expectEqualStrings("syntax", const_perr.?.code);
+
+    // Go `func Testabc(t *testing.T)` (lowercase after `Test`) is `fn`, while `TestAbc` is `test`.
+    var test_perr: ?parser.ParseErrorInfo = null;
+    const test_atoms = try parser.parseFile(
+        gpa,
+        "t_test.go",
+        "package p\nimport \"testing\"\nfunc Testabc(t *testing.T) {}\nfunc TestAbc(t *testing.T) {}\n",
+        null,
+        &test_perr,
+    );
+    defer parser.freeAtoms(gpa, test_atoms);
+    try std.testing.expectEqual(@as(usize, 2), test_atoms.len);
+    try std.testing.expectEqualStrings("fn", test_atoms[0].kind);
+    try std.testing.expectEqualStrings("p.Testabc", test_atoms[0].name);
+    try std.testing.expectEqualStrings("test", test_atoms[1].kind);
+    try std.testing.expectEqualStrings("p.test:TestAbc", test_atoms[1].name);
+
+    // Zig function with inline error set in return type `error{Bad}!i32` parses as `fn`.
+    var zig_err_perr: ?parser.ParseErrorInfo = null;
+    const zig_err_atoms = try parser.parseFile(
+        gpa,
+        "err_ret.zig",
+        "pub fn f() error{Bad}!i32 { return 0; }\n",
+        null,
+        &zig_err_perr,
+    );
+    defer parser.freeAtoms(gpa, zig_err_atoms);
+    try std.testing.expectEqual(@as(usize, 1), zig_err_atoms.len);
+    try std.testing.expectEqualStrings("fn", zig_err_atoms[0].kind);
+    try std.testing.expectEqualStrings("err_ret.f", zig_err_atoms[0].name);
 }
 
 test "CLI parse-corpus on Zig files" {
@@ -1278,12 +1317,28 @@ test "init layout and refusals" {
         try std.testing.expectEqualStrings("flint: refuse stream_exists main\n", res.out);
     }
 
-    // 4. Missing src -> refuse src_missing.
+    // 4. Missing src or non-directory src -> refuse src_missing.
     {
         const res = try h.runCmd(&.{ "init", "--name=w3", "--src=/host/missing" });
         defer gpa.free(res.out);
         try std.testing.expectEqual(@as(u8, 1), res.rc);
         try std.testing.expectEqualStrings("flint: refuse src_missing\n", res.out);
+    }
+    try mfs.writeFileSafe(gpa, "/host/not_a_dir.go", "package p\n");
+    {
+        const res = try h.runCmd(&.{ "init", "--name=w3", "--src=/host/not_a_dir.go" });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 1), res.rc);
+        try std.testing.expectEqualStrings("flint: refuse src_missing\n", res.out);
+    }
+
+    // 4b. Store-root discovery ignores regular files named `.flint` or `FLINT`.
+    try mfs.writeFileSafe(gpa, "/host/src/sub/.flint", "not a dir\n");
+    try mfs.writeFileSafe(gpa, "/host/src/sub/FLINT", "not a dir\n");
+    {
+        const resolved = try store.resolveStoreRoot(gpa, mfs, "", null, "/host/src/sub");
+        defer gpa.free(resolved);
+        try std.testing.expectEqualStrings("/host/FLINT", resolved);
     }
 
     // 5. Invalid workspace name -> refuse usage (exit 2).

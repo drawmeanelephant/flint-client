@@ -304,15 +304,15 @@ const GScan = struct {
                     self.skipSemis();
                     return;
                 }
-                try self.parseValueSpec(kw, spec_idx, atoms);
+                try self.parseValueSpec(kw, true, spec_idx, atoms);
                 spec_idx += 1;
             }
             return self.syntaxErr(self.at(self.i).start);
         }
-        try self.parseValueSpec(kw, 0, atoms);
+        try self.parseValueSpec(kw, false, 0, atoms);
     }
 
-    fn parseValueSpec(self: *GScan, kw: []const u8, spec_idx: usize, atoms: *std.ArrayList(Atom)) !void {
+    fn parseValueSpec(self: *GScan, kw: []const u8, in_group: bool, spec_idx: usize, atoms: *std.ArrayList(Atom)) !void {
         const first_name = self.at(self.i);
         if (first_name.kind != .ident) {
             return self.syntaxErr(first_name.start);
@@ -335,12 +335,14 @@ const GScan = struct {
         }
 
         var has_values = false;
+        var has_extra_toks = false;
         var last_end = names.items[names.items.len - 1].end;
         while (self.at(self.i).kind != .eof) {
             const cur = self.at(self.i);
             if (cur.kind == .semi or self.isPunct(self.i, ")")) {
                 break;
             }
+            has_extra_toks = true;
             if (self.isPunct(self.i, "(") or self.isPunct(self.i, "[") or self.isPunct(self.i, "{")) {
                 const close = try self.skipBalanced(self.i);
                 last_end = self.toks[close].end;
@@ -355,6 +357,14 @@ const GScan = struct {
             }
             last_end = cur.end;
             self.i += 1;
+        }
+
+        if (std.mem.eql(u8, kw, "const") and !has_values) {
+            if (!in_group or spec_idx == 0 or has_extra_toks) {
+                return self.syntaxErr(spec_start);
+            }
+        } else if (std.mem.eql(u8, kw, "var") and !has_values and !has_extra_toks) {
+            return self.syntaxErr(spec_start);
         }
 
         if (self.at(self.i).kind == .semi) {
@@ -663,7 +673,7 @@ fn isTestFunc(
     has_results: bool,
     param_toks: []const GoTok,
 ) bool {
-    if (name.len < 5 or !std.mem.startsWith(u8, name, "Test")) return false;
+    if (name.len < 5 or !std.mem.startsWith(u8, name, "Test") or (name[4] >= 'a' and name[4] <= 'z')) return false;
     if (has_type_params or has_results) return false;
 
     var filtered: [8]GoTok = undefined;

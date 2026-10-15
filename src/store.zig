@@ -510,13 +510,13 @@ pub fn resolveStoreRoot(
     var cur: []const u8 = clean_cwd;
     while (true) {
         const dot_flint = try fsys.joinPath(allocator, &.{ cur, ".flint" });
-        if (fs.exists(allocator, dot_flint)) {
+        if (fs.exists(allocator, dot_flint) and fs.isDir(allocator, dot_flint)) {
             return dot_flint;
         }
         allocator.free(dot_flint);
 
         const upper_flint = try fsys.joinPath(allocator, &.{ cur, "FLINT" });
-        if (fs.exists(allocator, upper_flint)) {
+        if (fs.exists(allocator, upper_flint) and fs.isDir(allocator, upper_flint)) {
             return upper_flint;
         }
         allocator.free(upper_flint);
