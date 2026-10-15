@@ -509,6 +509,33 @@ pub const SyncClient = struct {
         return out;
     }
 
+    pub fn list(self: *SyncClient) ![]store.Stream {
+        const seq = self.nextSeq();
+        var req: std.ArrayList(u8) = .empty;
+        defer req.deinit(self.allocator);
+        try req.print(self.allocator, "{{\"op\":\"list\",\"seq\":{d}}}", .{seq});
+
+        var parsed = try self.sendAndParse(req.items);
+        defer parsed.deinit();
+        const obj = try checkResponseOk(parsed.value, seq);
+
+        const streams_val = obj.get("streams") orelse return fsys.refuse("change_malformed", "");
+        const streams_arr = switch (streams_val) {
+            .array => |a| a,
+            else => return fsys.refuse("change_malformed", ""),
+        };
+
+        var out: std.ArrayList(store.Stream) = .empty;
+        errdefer {
+            for (out.items) |s| s.deinit(self.allocator);
+            out.deinit(self.allocator);
+        }
+        for (streams_arr.items) |item| {
+            try out.append(self.allocator, try parseStreamValue(self.allocator, item));
+        }
+        return out.toOwnedSlice(self.allocator);
+    }
+
     pub fn open(self: *SyncClient, stream_id_or_name: []const u8) !store.Stream {
         const seq = self.nextSeq();
         var req: std.ArrayList(u8) = .empty;
@@ -644,6 +671,33 @@ fn parseStreamValue(allocator: Allocator, val: std.json.Value) !store.Stream {
     defer out.deinit(allocator);
     try writeJsonValue(&out, allocator, val);
     return json.parseStream(allocator, out.items);
+}
+
+/// `open` that, on a remote `stream_missing`, lists the remote's streams and
+/// prints their names before the refusal propagates, so the operator sees
+/// what the server actually holds (flint-client#36).
+fn openStreamWithHint(client: *SyncClient, id_or_name: []const u8, stdout: *Io.Writer) !store.Stream {
+    return client.open(id_or_name) catch |err| {
+        if (err == error.Refuse and std.mem.eql(u8, fsys.last_refuse.code(), "stream_missing")) {
+            hintRemoteStreams(client, stdout);
+        }
+        return err;
+    };
+}
+
+fn hintRemoteStreams(client: *SyncClient, stdout: *Io.Writer) void {
+    const streams = client.list() catch return;
+    defer {
+        for (streams) |s| s.deinit(client.allocator);
+        client.allocator.free(streams);
+    }
+    if (streams.len == 0) {
+        stdout.writeAll("flint: remote streams: (none)\n") catch {};
+        return;
+    }
+    stdout.writeAll("flint: remote streams:") catch {};
+    for (streams) |s| stdout.print(" {s}", .{s.name}) catch {};
+    stdout.writeAll("\n") catch {};
 }
 
 fn writeJsonValue(out: *std.ArrayList(u8), allocator: Allocator, val: std.json.Value) !void {
@@ -877,7 +931,7 @@ pub fn cmdClone(
     var seen = std.StringHashMap(void).init(allocator);
     defer seen.deinit();
 
-    const target_stream = try client.open(stream_flag);
+    const target_stream = try openStreamWithHint(&client, stream_flag, stdout);
     try seen.put(target_stream.id, {});
     try chain.append(allocator, target_stream);
 
@@ -885,7 +939,7 @@ pub fn cmdClone(
         if (seen.contains(ff.stream)) {
             return fsys.refuse("stream_malformed", "fork cycle");
         }
-        const parent_st = try client.open(ff.stream);
+        const parent_st = try openStreamWithHint(&client, ff.stream, stdout);
         errdefer parent_st.deinit(allocator);
         try seen.put(parent_st.id, {});
         try chain.append(allocator, parent_st);
@@ -1418,7 +1472,7 @@ pub fn cmdPull(
 
     try client.handshake(auth_key);
 
-    const remote_rec = try client.open(target.stream.id);
+    const remote_rec = try openStreamWithHint(&client, target.stream.id, stdout);
     defer remote_rec.deinit(allocator);
 
     const remote_head = remote_rec.head orelse {

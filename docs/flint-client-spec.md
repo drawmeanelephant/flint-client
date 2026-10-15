@@ -68,7 +68,10 @@ non-refusal errors — print `flint: error <verb> <remote>: <reason>` with the
 resolved remote URL, so a failure surfaced through `REMOTE.json` or
 `FLINT_REMOTE` still names where it dialed; `<reason>` is a lowercase phrase
 (`connection refused`, `unknown host`, `connection timed out`, …), never a
-raw error-name token.
+raw error-name token. When a remote `open` refuses `stream_missing`, the verb
+additionally runs `list` and prints `flint: remote streams: <name> …` (or
+`flint: remote streams: (none)`) on the line before the refusal, so the
+operator sees what the server actually holds.
 
 Workspace selection for `add`/`status`/`commit`/`log`/`merge` follows the
 Go `resolveWorkspace`: `--ws=` names it (`ws_missing`); otherwise the sole
