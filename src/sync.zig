@@ -13,6 +13,13 @@ const sign = @import("sign.zig");
 const merge = @import("merge.zig");
 
 pub const ProtoVersion = "FLINT-SYNC/1";
+
+/// The protocol-visible spec revision this client implements. Must equal
+/// the repo-root `SPECREV` file — `tools/tests/test_specrev.py` enforces
+/// the match. Bump rules and the downstream-pinning convention live in
+/// `docs/spec-versioning.md`.
+pub const SpecRev: u32 = 1;
+
 pub const AuthDomain = "FLINT-SYNC-AUTH/1\x00";
 pub const DefaultReadLimit: usize = 256;
 pub const MaxBatchChanges: usize = 256;
@@ -399,6 +406,10 @@ pub const SyncClient = struct {
     transport: Transport,
     seq: u64 = 0,
     in_list_hint: bool = false,
+    /// Spec revision announced by the server in its `hello` reply
+    /// (`spec_rev` field), when present. Absent on older servers; see
+    /// `docs/spec-versioning.md`.
+    server_spec_rev: ?u32 = null,
 
     pub fn init(allocator: Allocator, transport: Transport) SyncClient {
         return .{
@@ -520,6 +531,19 @@ pub const SyncClient = struct {
         return out.toOwnedSlice(self.allocator);
     }
 
+    /// Records the server's announced `spec_rev` from a successful `hello`
+    /// reply, when present. Older servers omit the field; a non-integer or
+    /// out-of-range value is tolerated as unannounced rather than refused.
+    fn captureSpecRev(self: *SyncClient, obj: std.json.ObjectMap) void {
+        const rv = obj.get("spec_rev") orelse return;
+        switch (rv) {
+            .integer => |i| if (i >= 0 and i <= std.math.maxInt(u32)) {
+                self.server_spec_rev = @intCast(i);
+            },
+            else => {},
+        }
+    }
+
     pub fn handshake(self: *SyncClient, auth_key: ?[32]u8) !void {
         const seq1 = self.nextSeq();
         var req_buf: std.ArrayList(u8) = .empty;
@@ -568,6 +592,7 @@ pub const SyncClient = struct {
                         if (pval != .string or !std.mem.eql(u8, pval.string, ProtoVersion)) {
                             return fsys.refuse("proto_version", "");
                         }
+                        self.captureSpecRev(obj2);
                         return;
                     }
                 }
@@ -584,6 +609,7 @@ pub const SyncClient = struct {
         if (!std.mem.eql(u8, proto_str, ProtoVersion)) {
             return fsys.refuse("proto_version", "");
         }
+        self.captureSpecRev(obj);
 
         if (obj.get("nonce")) |nv| {
             if (nv == .string and nv.string.len > 0) {
@@ -1864,6 +1890,77 @@ fn pullResetToRemote(
     try stdout.print("flint: pull reset stream={s} changes={d} head={s}\n", .{ loaded.stream.name, missing.items.len, remote_head });
 }
 
+/// Implements `flint version [--remote=<url>] [--auth-key=<file>]` — prints
+/// the client's spec revision (`SpecRev`, matching the repo-root `SPECREV`
+/// file). When a remote is resolvable (`--remote` flag, then `FLINT_REMOTE`) it additionally
+/// performs the `hello` handshake and reports the server's announced
+/// `spec_rev` (`unannounced` on servers that predate the field).
+/// No store is required.
+pub fn cmdVersion(
+    allocator: Allocator,
+    io: Io,
+    fs: FS,
+    env_remote: ?[]const u8,
+    env_auth_key: ?[]const u8,
+    dial_fn: DialFn,
+    dial_ctx: ?*anyopaque,
+    stdout: *Io.Writer,
+    args: []const []const u8,
+) !void {
+    var remote_flag: []const u8 = "";
+    var auth_key_flag: []const u8 = "";
+
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        const a = args[i];
+        if (std.mem.startsWith(u8, a, "--remote=")) {
+            remote_flag = a["--remote=".len..];
+            if (remote_flag.len == 0) return fsys.refuse("usage", "");
+        } else if (std.mem.eql(u8, a, "--remote")) {
+            if (i + 1 >= args.len or args[i + 1].len == 0) return fsys.refuse("usage", "");
+            i += 1;
+            remote_flag = args[i];
+        } else if (std.mem.startsWith(u8, a, "--auth-key=")) {
+            auth_key_flag = a["--auth-key=".len..];
+            if (auth_key_flag.len == 0) return fsys.refuse("usage", "");
+        } else if (std.mem.eql(u8, a, "--auth-key")) {
+            if (i + 1 >= args.len or args[i + 1].len == 0) return fsys.refuse("usage", "");
+            i += 1;
+            auth_key_flag = args[i];
+        } else {
+            return fsys.refuse("usage", "");
+        }
+    }
+
+    const remote_url = if (remote_flag.len > 0)
+        remote_flag
+    else if (env_remote) |e|
+        e
+    else
+        "";
+    if (remote_url.len > 0) {
+        _ = try parseTcpRemoteUrl(remote_url);
+        fsys.setErrContext("version", remote_url);
+    }
+
+    try stdout.print("flint: version spec_rev={d} proto={s}\n", .{ SpecRev, ProtoVersion });
+    if (remote_url.len == 0) return;
+
+    var auth_key = try loadAuthKey(allocator, fs, auth_key_flag, env_auth_key);
+    defer if (auth_key) |*k| @memset(k, 0);
+
+    const transport = try dial_fn(dial_ctx, allocator, io, remote_url);
+    var client = SyncClient.init(allocator, transport);
+    defer client.deinit();
+    try client.handshake(auth_key);
+
+    if (client.server_spec_rev) |rev| {
+        try stdout.print("flint: remote {s} proto={s} spec_rev={d}\n", .{ remote_url, ProtoVersion, rev });
+    } else {
+        try stdout.print("flint: remote {s} proto={s} spec_rev=unannounced\n", .{ remote_url, ProtoVersion });
+    }
+}
+
 /// In-process `FLINT-SYNC/1` server fixture (`flintd` equivalent) for conformance testing
 /// over both in-memory transports and real loopback TCP sockets.
 pub const InProcServer = struct {
@@ -1873,6 +1970,9 @@ pub const InProcServer = struct {
     auth_key: ?[32]u8 = null,
     nonce_hex: [32]u8 = "000102030405060708090a0b0c0d0e0f".*,
     allow_authors: ?[]const []const u8 = null,
+    /// When set, `hello` replies announce this `spec_rev` — mirrors the
+    /// server-side `SPECREV` announcement tracked for `flintd`.
+    spec_rev: ?u32 = null,
     tamper_read_sig: bool = false,
     force_refuse_op: ?[]const u8 = null,
     force_refuse_code: ?[]const u8 = null,
@@ -1951,9 +2051,13 @@ pub const InProcServer = struct {
                 errdefer out.deinit(allocator);
                 try out.print(
                     allocator,
-                    "{{\"seq\":{d},\"ok\":true,\"proto\":\"{s}\",\"server\":\"flintd\"}}",
+                    "{{\"seq\":{d},\"ok\":true,\"proto\":\"{s}\",\"server\":\"flintd\"",
                     .{ seq, ProtoVersion },
                 );
+                if (self.server.spec_rev) |rev| {
+                    try out.print(allocator, ",\"spec_rev\":{d}", .{rev});
+                }
+                try out.append(allocator, '}');
                 return out.toOwnedSlice(allocator);
             }
 
@@ -2464,6 +2568,101 @@ pub const InProcServer = struct {
         }
     }
 };
+
+test "handshake: captures spec_rev when announced, tolerates absence, survives auth round" {
+    const gpa = std.testing.allocator;
+
+    var mem = try fsys.MemFS.init(gpa);
+    defer mem.deinit();
+
+    var server = InProcServer{
+        .allocator = gpa,
+        .fs = mem.fs(),
+        .store_root = "/srv/FLINT",
+    };
+
+    // Field absent: handshake succeeds, server_spec_rev stays null.
+    {
+        const transport = try InProcServer.dial(&server, gpa, std.testing.io, "tcp://127.0.0.1:4748");
+        var client = SyncClient.init(gpa, transport);
+        defer client.deinit();
+        try client.handshake(null);
+        try std.testing.expectEqual(@as(?u32, null), client.server_spec_rev);
+    }
+
+    // Announced integer is captured.
+    server.spec_rev = 7;
+    {
+        const transport = try InProcServer.dial(&server, gpa, std.testing.io, "tcp://127.0.0.1:4748");
+        var client = SyncClient.init(gpa, transport);
+        defer client.deinit();
+        try client.handshake(null);
+        try std.testing.expectEqual(@as(?u32, 7), client.server_spec_rev);
+    }
+
+    // Auth challenge round: spec_rev arrives on the post-auth hello reply.
+    const secret = "a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5";
+    var key: [32]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&key, secret);
+    server.auth_key = key;
+    {
+        const transport = try InProcServer.dial(&server, gpa, std.testing.io, "tcp://127.0.0.1:4748");
+        var client = SyncClient.init(gpa, transport);
+        defer client.deinit();
+        try client.handshake(key);
+        try std.testing.expectEqual(@as(?u32, 7), client.server_spec_rev);
+    }
+}
+
+test "cmdVersion: client spec_rev, remote spec_rev or unannounced, env fallback, refusals" {
+    const gpa = std.testing.allocator;
+
+    var mem = try fsys.MemFS.init(gpa);
+    defer mem.deinit();
+    const fs = mem.fs();
+
+    var server = InProcServer{
+        .allocator = gpa,
+        .fs = fs,
+        .store_root = "/srv/FLINT",
+    };
+
+    // Bare `version`: client rev only, no dial.
+    {
+        var out: std.Io.Writer.Allocating = .init(gpa);
+        defer out.deinit();
+        try cmdVersion(gpa, std.testing.io, fs, null, null, InProcServer.dial, &server, &out.writer, &.{});
+        const want = try std.fmt.allocPrint(gpa, "flint: version spec_rev={d} proto={s}\n", .{ SpecRev, ProtoVersion });
+        defer gpa.free(want);
+        try std.testing.expectEqualStrings(want, out.written());
+    }
+
+    // A server that does not announce `spec_rev` reports `unannounced`.
+    {
+        var out: std.Io.Writer.Allocating = .init(gpa);
+        defer out.deinit();
+        try cmdVersion(gpa, std.testing.io, fs, null, null, InProcServer.dial, &server, &out.writer, &.{"--remote=tcp://127.0.0.1:4748"});
+        const want = try std.fmt.allocPrint(gpa, "flint: version spec_rev={d} proto={s}\n" ++
+            "flint: remote tcp://127.0.0.1:4748 proto={s} spec_rev=unannounced\n", .{ SpecRev, ProtoVersion, ProtoVersion });
+        defer gpa.free(want);
+        try std.testing.expectEqualStrings(want, out.written());
+    }
+
+    // Announced rev is reported verbatim; also exercises FLINT_REMOTE fallback.
+    server.spec_rev = 42;
+    {
+        var out: std.Io.Writer.Allocating = .init(gpa);
+        defer out.deinit();
+        try cmdVersion(gpa, std.testing.io, fs, "tcp://127.0.0.1:4748", null, InProcServer.dial, &server, &out.writer, &.{});
+        try std.testing.expect(std.mem.indexOf(u8, out.written(), "spec_rev=42\n") != null);
+    }
+
+    // Malformed remote and stray args refuse before printing.
+    try std.testing.expectError(error.Refuse, cmdVersion(gpa, std.testing.io, fs, null, null, InProcServer.dial, &server, undefined, &.{"--remote=nope"}));
+    try std.testing.expectEqualStrings("remote_malformed", fsys.last_refuse.code());
+    try std.testing.expectError(error.Refuse, cmdVersion(gpa, std.testing.io, fs, null, null, InProcServer.dial, &server, undefined, &.{"bogus"}));
+    try std.testing.expectEqualStrings("usage", fsys.last_refuse.code());
+}
 
 test "parseStreamValue: remote stream names must match [a-z0-9-]{1,32} (#52)" {
     const gpa = std.testing.allocator;

@@ -109,6 +109,7 @@ fn printHelp(w: *Io.Writer) void {
         \\  release --elf=<f> --name=<n> --version=<v> [--manifest-row=<r>] [--ws=<n>] [--key=<k>] [-m <msg>] [--dry-run]
         \\  parse-corpus <dir>
         \\  keygen [--name=<n>]
+        \\  version [--remote=<url>] [--auth-key=<file>]
         \\
         \\note: passing a 64-hex seed literal via --key or FLINT_SIGN_KEY exposes
         \\it in /proc/<pid>/environ, ps output, and shell history; prefer key names
@@ -235,6 +236,24 @@ pub fn runWithContext(ctx: Context, args: []const []const u8) u8 {
         return render.cmdParseCorpus(ctx.allocator, ctx.fs, sub, ctx.stdout) catch |err| {
             return handleErr(err, ctx.stdout);
         };
+    }
+
+    if (std.mem.eql(u8, verb, "version")) {
+        const dial_fn = ctx.sync_dial orelse sync.defaultTcpDial;
+        sync.cmdVersion(
+            ctx.allocator,
+            ctx.io,
+            ctx.fs,
+            ctx.env_flint_remote,
+            ctx.env_flint_auth_key,
+            dial_fn,
+            ctx.sync_dial_ctx,
+            ctx.stdout,
+            sub,
+        ) catch |err| {
+            return handleErr(err, ctx.stdout);
+        };
+        return 0;
     }
 
     // `release` resolves the store itself so `--dry-run` works anywhere.
@@ -3965,4 +3984,16 @@ test "clone creates a missing --src dir; a file path still refuses src_missing (
         try std.testing.expectEqual(@as(u8, 1), res.rc);
         try std.testing.expectEqualStrings("flint: refuse src_missing /host/SRCC\n", res.out);
     }
+}
+
+test "version verb: prints client spec_rev without a store" {
+    const gpa = std.testing.allocator;
+    var h = try TestHarness.init(gpa);
+    defer h.deinit();
+    const res = try h.runCmd(&.{"version"});
+    defer gpa.free(res.out);
+    try std.testing.expectEqual(@as(u8, 0), res.rc);
+    const want = try std.fmt.allocPrint(gpa, "flint: version spec_rev={d} proto={s}\n", .{ sync.SpecRev, sync.ProtoVersion });
+    defer gpa.free(want);
+    try std.testing.expectEqualStrings(want, res.out);
 }
