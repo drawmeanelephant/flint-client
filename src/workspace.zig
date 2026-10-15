@@ -407,7 +407,9 @@ pub fn cmdAdd(
         const decls = parser.parseFile(allocator, rel, src, null, &perr) catch |err| switch (err) {
             error.ParseFailed => {
                 if (perr) |pe| {
-                    return fsys.refuse(pe.code, pe.file);
+                    const detail = try std.fmt.allocPrint(allocator, "{s}:{d}", .{ pe.file, pe.offset });
+                    defer allocator.free(detail);
+                    return fsys.refuse(pe.code, detail);
                 }
                 return fsys.refuse("syntax", rel);
             },
