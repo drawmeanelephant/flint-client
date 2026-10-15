@@ -411,11 +411,11 @@ pub fn keyFilePath(allocator: Allocator, root: []const u8, name: []const u8) ![]
     return std.fmt.allocPrint(allocator, "{s}/keys/{s}", .{ fsys.cleanMemPath(root), name });
 }
 
-/// ReadJSONLLines splits a JSONL payload into lines and enforces the ADR 0049
+/// ReadJSONLLinesWithCode splits a JSONL payload into lines and enforces the ADR 0049
 /// torn-append rule: any non-empty payload whose final byte is not '\n' is
 /// refused with `stream_torn`. An empty line inside the JSONL is refused with
-/// `change_malformed`.
-pub fn readJSONLLines(allocator: Allocator, data: []const u8) ![]const []const u8 {
+/// `empty_refuse_code` (`change_malformed`, `atom_malformed`, or `stage_malformed`).
+pub fn readJSONLLinesWithCode(allocator: Allocator, data: []const u8, empty_refuse_code: []const u8) ![]const []const u8 {
     if (data.len == 0) return &.{};
     if (data[data.len - 1] != '\n') {
         return fsys.refuse("stream_torn", "");
@@ -427,11 +427,15 @@ pub fn readJSONLLines(allocator: Allocator, data: []const u8) ![]const []const u
     var it = std.mem.splitScalar(u8, trimmed, '\n');
     while (it.next()) |line| {
         if (line.len == 0) {
-            return fsys.refuse("change_malformed", "");
+            return fsys.refuse(empty_refuse_code, "");
         }
         try out.append(allocator, line);
     }
     return out.toOwnedSlice(allocator);
+}
+
+pub fn readJSONLLines(allocator: Allocator, data: []const u8) ![]const []const u8 {
+    return readJSONLLinesWithCode(allocator, data, "change_malformed");
 }
 
 pub fn opTypeCode(t: []const u8) u8 {
@@ -846,7 +850,7 @@ pub fn loadWorkspaceAtoms(allocator: Allocator, fs: FS, root: []const u8, ws: []
     const b = try fs.readFile(allocator, p, MaxFileReadBytes);
     defer allocator.free(b);
 
-    const lines = try readJSONLLines(allocator, b);
+    const lines = try readJSONLLinesWithCode(allocator, b, "atom_malformed");
     defer allocator.free(lines);
 
     if (lines.len > MaxAtoms) {
@@ -905,7 +909,7 @@ pub fn loadWorkspaceStage(allocator: Allocator, fs: FS, root: []const u8, ws: []
     const b = try fs.readFile(allocator, p, MaxFileReadBytes);
     defer allocator.free(b);
 
-    const lines = try readJSONLLines(allocator, b);
+    const lines = try readJSONLLinesWithCode(allocator, b, "stage_malformed");
     defer allocator.free(lines);
 
     if (lines.len > MaxAtoms) {
