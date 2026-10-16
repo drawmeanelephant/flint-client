@@ -52,6 +52,7 @@ makes several protocol-visible changes still bumps once.
 | Rev | Change | Ref |
 |---|---|---|
 | 1 | `SPECREV` convention; client parses optional `spec_rev` in `hello` replies; `flint version` verb | [#50](https://github.com/drawmeanelephant/flint-client/issues/50) |
+| 2 | `ws/<name>/BASE.json` staging-base record (`{"head":…}`); `add` stamps it, `commit` refuses `stage_stale` when the recorded base differs from the current head or is missing | [#67](https://github.com/drawmeanelephant/flint-client/issues/67) |
 
 ## 3. The `hello` `spec_rev` field
 

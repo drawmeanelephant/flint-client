@@ -113,6 +113,30 @@ pub fn cmdCommit(
 
     const expected_head = loaded.stream.head;
 
+    // Staging-base guard (#67): STAGE.jsonl was diffed against the stream head
+    // `add` recorded in ws/<ws>/BASE.json. A pull, pull --reset, or another
+    // workspace's commit can move the head afterwards; committing would
+    // silently reparent the old staged intent onto the new head, so refuse
+    // `stage_stale` instead. Re-running `add` re-stamps the base — that is the
+    // documented explicit restage; there is no bypass flag. A stage without
+    // BASE.json (written before this guard existed) has unknown provenance and
+    // refuses the same way rather than silently assuming the latest head.
+    const stage_base = try store.loadWorkspaceStageBase(allocator, fs, root, ws.name);
+    defer if (stage_base) |sb| sb.deinit(allocator);
+    if (stage_base) |sb| {
+        if (!store.optStrEql(sb.head, expected_head)) {
+            const detail = try std.fmt.allocPrint(
+                allocator,
+                "staged against {s}; stream head is now {s}; re-run add to restage",
+                .{ sb.head orelse "none", expected_head orelse "none" },
+            );
+            defer allocator.free(detail);
+            return fsys.refuse("stage_stale", detail);
+        }
+    } else {
+        return fsys.refuse("stage_stale", "stage base unknown; re-run add to restage");
+    }
+
     const ts = try uuid_gen.nowMs();
     const change_id = try uuid_gen.new();
 
@@ -146,6 +170,12 @@ pub fn cmdCommit(
     const stage_path = try store.workspaceStagePath(allocator, root, ws.name);
     defer allocator.free(stage_path);
     try fs.remove(allocator, stage_path);
+
+    const base_path = try store.workspaceBasePath(allocator, root, ws.name);
+    defer allocator.free(base_path);
+    if (fs.exists(allocator, base_path)) {
+        try fs.remove(allocator, base_path);
+    }
 
     if (merge_report != null) {
         const merge_path = try store.workspaceMergePath(allocator, root, ws.name);

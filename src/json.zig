@@ -283,6 +283,23 @@ pub fn marshalMergeReportLine(allocator: Allocator, mr: store.MergeReport) ![]u8
     return out.toOwnedSlice(allocator);
 }
 
+/// Serializes the stage-base record (`ws/<name>/BASE.json`) as a single JSON
+/// line with trailing `\n`: `{"head":"<id>"}` or `{"head":null}` (#67).
+pub fn marshalStageBaseLine(allocator: Allocator, head: ?[]const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+
+    try out.appendSlice(allocator, "{\"head\":");
+    if (head) |h| {
+        try appendGoJSONString(&out, allocator, h);
+    } else {
+        try out.appendSlice(allocator, "null");
+    }
+    try out.appendSlice(allocator, "}\n");
+
+    return out.toOwnedSlice(allocator);
+}
+
 /// Serializes `RemoteConfig` as a single JSON line with trailing `\n`
 /// in field order: `remote`, `stream`.
 pub fn marshalRemoteConfigLine(allocator: Allocator, rc: store.RemoteConfig) ![]u8 {
@@ -601,6 +618,15 @@ pub fn parseWorkspace(allocator: Allocator, data: []const u8) !store.Workspace {
         .stream = stream,
         .created = created,
     };
+}
+
+/// Parses `ws/<name>/BASE.json` — the stream head a pending stage was last
+/// staged against (`{"head":...}`).
+pub fn parseStageBase(allocator: Allocator, data: []const u8) !?[]const u8 {
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, data, .{});
+    defer parsed.deinit();
+    if (parsed.value != .object) return error.InvalidJsonField;
+    return try getNullableStrDupe(allocator, parsed.value.object, "head");
 }
 
 pub fn parseRemoteConfig(allocator: Allocator, data: []const u8) !store.RemoteConfig {

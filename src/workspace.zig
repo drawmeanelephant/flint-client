@@ -695,8 +695,15 @@ pub fn cmdAdd(
         return fsys.refuse("store_too_large", "atoms");
     }
 
+    // Staging base (#67): record the stream head this stage asserts against.
+    // `commit` refuses `stage_stale` when the head has moved since; re-running
+    // `add` re-stamps the base and is the documented explicit restage.
+    const loaded_stream = try store.loadStream(allocator, fs, root, ws.stream);
+    defer loaded_stream.deinit(allocator);
+
     try store.writeWorkspaceAtoms(allocator, fs, root, ws.name, new_atoms.items);
     try store.writeWorkspaceStage(allocator, fs, root, ws.name, folded_stage);
+    try store.writeWorkspaceStageBase(allocator, fs, root, ws.name, loaded_stream.stream.head);
 
     try out.print(
         "flint: add files={d} new={d} modified={d} deleted={d} unchanged={d}\n",
