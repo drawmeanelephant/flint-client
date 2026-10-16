@@ -15,6 +15,8 @@ pub const sign = @import("sign.zig");
 pub const merge = @import("merge.zig");
 pub const sync = @import("sync.zig");
 pub const release = @import("release.zig");
+pub const report = @import("report.zig");
+const jsond = @import("json_dispatch.zig");
 
 /// Runtime context for executing a `flint` command.
 /// Allows injecting an in-memory filesystem, custom writers, clock/RNG, and environment in tests.
@@ -111,6 +113,10 @@ fn printHelp(w: *Io.Writer) void {
         \\  keygen [--name=<n>]
         \\  version [--remote=<url>] [--auth-key=<file>]
         \\
+        \\--json: emit one versioned JSON result envelope instead of text
+        \\  (docs/flint-json-results-spec.md); collaboration verbs carry
+        \\  structured payloads, other verbs emit the envelope only.
+        \\
         \\note: passing a 64-hex seed literal via --key or FLINT_SIGN_KEY exposes
         \\it in /proc/<pid>/environ, ps output, and shell history; prefer key names
         \\stored under <store>/keys/<name>.
@@ -121,7 +127,7 @@ fn printHelp(w: *Io.Writer) void {
 /// Maps common host/transport error names to lowercase phrases so `flint:
 /// error` lines read like the Go implementation's console messages instead
 /// of leaking raw Zig error names. Unmapped names print verbatim.
-fn friendlyErrorName(err: anyerror) []const u8 {
+pub fn friendlyErrorName(err: anyerror) []const u8 {
     return switch (err) {
         error.ConnectionRefused => "connection refused",
         error.ConnectionResetByPeer => "connection reset by peer",
@@ -161,15 +167,16 @@ pub fn handleErr(err: anyerror, out: *Io.Writer) u8 {
     return 1;
 }
 
-/// Extracts `--store <dir>` or `--store=<dir>` from anywhere in `args`,
-/// returning the remaining arguments in order.
+/// Extracts `--store <dir>`/`--store=<dir>` and `--json` from anywhere in
+/// `args`, returning the remaining arguments in order.
 fn extractGlobalArgs(
     allocator: Allocator,
     args: []const []const u8,
-) !struct { store_flag: []const u8, help: bool, rest: [][]const u8 } {
+) !struct { store_flag: []const u8, help: bool, json: bool, rest: [][]const u8 } {
     var store_flag: []const u8 = "";
     var has_store = false;
     var help = false;
+    var json_mode = false;
     var rest: std.ArrayList([]const u8) = .empty;
     errdefer rest.deinit(allocator);
 
@@ -190,6 +197,8 @@ fn extractGlobalArgs(
             has_store = true;
         } else if (std.mem.eql(u8, a, "-h") or std.mem.eql(u8, a, "--help")) {
             help = true;
+        } else if (std.mem.eql(u8, a, "--json")) {
+            json_mode = true;
         } else {
             try rest.append(allocator, a);
         }
@@ -198,16 +207,26 @@ fn extractGlobalArgs(
     return .{
         .store_flag = store_flag,
         .help = help,
+        .json = json_mode,
         .rest = try rest.toOwnedSlice(allocator),
     };
 }
 
 pub fn runWithContext(ctx: Context, args: []const []const u8) u8 {
     fsys.clearErrContext();
+    report.active = null;
+    defer report.active = null;
+
     var default_uuid = uuid.UUIDGen.initHost(ctx.io);
     const uuid_gen = ctx.uuid_gen orelse &default_uuid;
 
     const extracted = extractGlobalArgs(ctx.allocator, args) catch |err| {
+        if (jsond.wantJson(args)) {
+            var rep = report.Report.init(ctx.allocator, "");
+            defer rep.deinit();
+            report.active = &rep;
+            return jsond.fail(&rep, err, &ctx);
+        }
         return handleErr(err, ctx.stdout);
     };
     defer ctx.allocator.free(extracted.rest);
@@ -217,25 +236,50 @@ pub fn runWithContext(ctx: Context, args: []const []const u8) u8 {
         return 0;
     }
 
+    // --json: stdout carries only the marshaled envelope. Verbs write their
+    // legacy `flint: ` lines into a discarded writer (the text path runs
+    // unchanged — output stays byte-compatible by construction) and record
+    // structured results into `report.active` as they compute them.
+    var rep: report.Report = undefined;
+    var sink: Io.Writer.Allocating = undefined;
+    var rep_opt: ?*report.Report = null;
+    var out_w: *Io.Writer = ctx.stdout;
+    if (extracted.json) {
+        rep = report.Report.init(ctx.allocator, "");
+        sink = .init(ctx.allocator);
+        rep_opt = &rep;
+        report.active = &rep;
+        out_w = &sink.writer;
+    }
+    defer if (rep_opt) |r| {
+        report.active = null;
+        r.deinit();
+        sink.deinit();
+    };
+
     if (extracted.rest.len == 0) {
+        if (rep_opt != null) return jsond.fail(rep_opt, fsys.refuse("usage", ""), &ctx);
         printUsage(ctx.stdout);
         return 2;
     }
 
     const verb = extracted.rest[0];
     const sub = extracted.rest[1..];
+    if (rep_opt) |r| r.verb = verb;
 
     // Verbs that do not require a store root:
     if (std.mem.eql(u8, verb, "verify") and ed25519.verifyFileArg(sub) != null) {
-        return ed25519.cmdVerify(ctx.allocator, ctx.fs, null, sub, ctx.stdout) catch |err| {
-            return handleErr(err, ctx.stdout);
+        const rc = ed25519.cmdVerify(ctx.allocator, ctx.fs, null, sub, out_w) catch |err| {
+            return jsond.fail(rep_opt, err, &ctx);
         };
+        return jsond.ok(rep_opt, rc, &ctx);
     }
 
     if (std.mem.eql(u8, verb, "parse-corpus")) {
-        return render.cmdParseCorpus(ctx.allocator, ctx.fs, sub, ctx.stdout) catch |err| {
-            return handleErr(err, ctx.stdout);
+        const rc = render.cmdParseCorpus(ctx.allocator, ctx.fs, sub, out_w) catch |err| {
+            return jsond.fail(rep_opt, err, &ctx);
         };
+        return jsond.ok(rep_opt, rc, &ctx);
     }
 
     if (std.mem.eql(u8, verb, "version")) {
@@ -248,12 +292,12 @@ pub fn runWithContext(ctx: Context, args: []const []const u8) u8 {
             ctx.env_flint_auth_key,
             dial_fn,
             ctx.sync_dial_ctx,
-            ctx.stdout,
+            out_w,
             sub,
         ) catch |err| {
-            return handleErr(err, ctx.stdout);
+            return jsond.fail(rep_opt, err, &ctx);
         };
-        return 0;
+        return jsond.ok(rep_opt, 0, &ctx);
     }
 
     // `release` resolves the store itself so `--dry-run` works anywhere.
@@ -266,12 +310,12 @@ pub fn runWithContext(ctx: Context, args: []const []const u8) u8 {
             ctx.env_flint_sign_key,
             ctx.cwd,
             uuid_gen,
-            ctx.stdout,
+            out_w,
             sub,
         ) catch |err| {
-            return handleErr(err, ctx.stdout);
+            return jsond.fail(rep_opt, err, &ctx);
         };
-        return 0;
+        return jsond.ok(rep_opt, 0, &ctx);
     }
 
     const is_known_store_verb = std.mem.eql(u8, verb, "keygen") or
@@ -288,6 +332,7 @@ pub fn runWithContext(ctx: Context, args: []const []const u8) u8 {
         std.mem.eql(u8, verb, "pull");
 
     if (!is_known_store_verb) {
+        if (rep_opt != null) return jsond.fail(rep_opt, fsys.refuse("usage", ""), &ctx);
         printUsage(ctx.stdout);
         return 2;
     }
@@ -300,132 +345,15 @@ pub fn runWithContext(ctx: Context, args: []const []const u8) u8 {
         ctx.cwd,
     ) catch |err| blk: {
         if (err == error.Refuse and (std.mem.eql(u8, verb, "init") or std.mem.eql(u8, verb, "clone"))) {
-            const clean_cwd = fsys.cleanPath(ctx.allocator, if (ctx.cwd.len > 0) ctx.cwd else ".") catch |e| return handleErr(e, ctx.stdout);
+            const clean_cwd = fsys.cleanPath(ctx.allocator, if (ctx.cwd.len > 0) ctx.cwd else ".") catch |e| return jsond.fail(rep_opt, e, &ctx);
             defer ctx.allocator.free(clean_cwd);
-            break :blk fsys.joinPath(ctx.allocator, &.{ clean_cwd, ".flint" }) catch |e| return handleErr(e, ctx.stdout);
+            break :blk fsys.joinPath(ctx.allocator, &.{ clean_cwd, ".flint" }) catch |e| return jsond.fail(rep_opt, e, &ctx);
         }
-        return handleErr(err, ctx.stdout);
+        return jsond.fail(rep_opt, err, &ctx);
     };
     defer ctx.allocator.free(root);
 
-    if (std.mem.eql(u8, verb, "init")) {
-        workspace.cmdInit(ctx.allocator, ctx.fs, root, uuid_gen, ctx.stdout, sub) catch |err| {
-            return handleErr(err, ctx.stdout);
-        };
-        return 0;
-    }
-
-    if (std.mem.eql(u8, verb, "add")) {
-        workspace.cmdAdd(ctx.allocator, ctx.fs, root, uuid_gen, ctx.stdout, sub) catch |err| {
-            return handleErr(err, ctx.stdout);
-        };
-        return 0;
-    }
-
-    if (std.mem.eql(u8, verb, "status")) {
-        workspace.cmdStatus(ctx.allocator, ctx.fs, root, ctx.stdout, sub) catch |err| {
-            return handleErr(err, ctx.stdout);
-        };
-        return 0;
-    }
-
-    if (std.mem.eql(u8, verb, "commit")) {
-        sign.cmdCommit(ctx.allocator, ctx.fs, root, uuid_gen, ctx.env_flint_sign_key, ctx.stdout, sub) catch |err| {
-            return handleErr(err, ctx.stdout);
-        };
-        return 0;
-    }
-
-    if (std.mem.eql(u8, verb, "log")) {
-        sign.cmdLog(ctx.allocator, ctx.fs, root, ctx.stdout, sub) catch |err| {
-            return handleErr(err, ctx.stdout);
-        };
-        return 0;
-    }
-
-    if (std.mem.eql(u8, verb, "fork")) {
-        merge.cmdFork(ctx.allocator, ctx.fs, root, uuid_gen, ctx.stdout, sub) catch |err| {
-            return handleErr(err, ctx.stdout);
-        };
-        return 0;
-    }
-
-    if (std.mem.eql(u8, verb, "merge")) {
-        return merge.cmdMerge(ctx.allocator, ctx.fs, root, uuid_gen, ctx.env_flint_sign_key, ctx.stdout, sub) catch |err| {
-            return handleErr(err, ctx.stdout);
-        };
-    }
-
-    const dial_fn = ctx.sync_dial orelse sync.defaultTcpDial;
-
-    if (std.mem.eql(u8, verb, "clone")) {
-        sync.cmdClone(
-            ctx.allocator,
-            ctx.io,
-            ctx.fs,
-            root,
-            ctx.env_flint_remote,
-            ctx.env_flint_auth_key,
-            dial_fn,
-            ctx.sync_dial_ctx,
-            ctx.stdout,
-            sub,
-        ) catch |err| {
-            return handleErr(err, ctx.stdout);
-        };
-        return 0;
-    }
-
-    if (std.mem.eql(u8, verb, "push")) {
-        sync.cmdPush(
-            ctx.allocator,
-            ctx.io,
-            ctx.fs,
-            root,
-            ctx.env_flint_remote,
-            ctx.env_flint_auth_key,
-            dial_fn,
-            ctx.sync_dial_ctx,
-            ctx.stdout,
-            sub,
-        ) catch |err| {
-            return handleErr(err, ctx.stdout);
-        };
-        return 0;
-    }
-
-    if (std.mem.eql(u8, verb, "pull")) {
-        sync.cmdPull(
-            ctx.allocator,
-            ctx.io,
-            ctx.fs,
-            root,
-            ctx.env_flint_remote,
-            ctx.env_flint_auth_key,
-            dial_fn,
-            ctx.sync_dial_ctx,
-            ctx.stdout,
-            sub,
-        ) catch |err| {
-            return handleErr(err, ctx.stdout);
-        };
-        return 0;
-    }
-
-    if (std.mem.eql(u8, verb, "keygen")) {
-        ed25519.cmdKeygen(ctx.allocator, ctx.fs, root, uuid_gen, sub, ctx.stdout) catch |err| {
-            return handleErr(err, ctx.stdout);
-        };
-        return 0;
-    }
-
-    if (std.mem.eql(u8, verb, "verify")) {
-        return ed25519.cmdVerify(ctx.allocator, ctx.fs, root, sub, ctx.stdout) catch |err| {
-            return handleErr(err, ctx.stdout);
-        };
-    }
-
-    return handleErr(fsys.refuse("usage", ""), ctx.stdout);
+    return jsond.dispatchStoreVerb(&ctx, rep_opt, out_w, uuid_gen, root, verb, sub);
 }
 
 test {
@@ -442,6 +370,8 @@ test {
     _ = merge;
     _ = sync;
     _ = release;
+    _ = report;
+    _ = @import("json_results_test.zig");
     _ = @import("sync_scenarios_test.zig");
 }
 
