@@ -926,27 +926,48 @@ pub fn cmdMerge(
         try atoms_by_id.put(k, cloned);
     }
 
-    // Count distinct files affected by the merged Ops before/after applying them.
-    var unmaterialized_files = std.StringHashMap(void).init(allocator);
-    defer unmaterialized_files.deinit();
-    for (c.ops) |op| {
-        if (atoms_by_id.get(op.atom_id)) |a| {
-            if (a.span.file.len > 0) {
-                try unmaterialized_files.put(a.span.file, {});
-            }
-        }
-        if (op.new_span) |sp| {
-            if (sp.file.len > 0) {
-                try unmaterialized_files.put(sp.file, {});
-            }
-        }
-    }
-    const unmaterialized_count = unmaterialized_files.count();
-
     try store.applyOpsToAtomMap(allocator, &atoms_by_id, c.ops, true);
     if (atoms_by_id.count() > store.MaxAtoms) {
         return fsys.refuse("store_too_large", "atoms");
     }
+
+    // (#72) Merged-table atoms the pre-merge workspace table did not describe
+    // — same id and hash — were never materialized into src, e.g. into-side
+    // changes replayed after `pull --reset`. Mark them `origin = "merge"` so
+    // `add` refuses `src_behind` instead of staging a silent revert of the
+    // accepted peer edits. Atoms that already match are left unmarked: if src
+    // already carries the same bytes the guard passes cleanly.
+    {
+        const pre_merge = try store.loadWorkspaceAtoms(allocator, fs, root, ws.name);
+        defer store.freeStoredAtoms(allocator, pre_merge);
+        var old_hash_by_id = std.StringHashMap([]const u8).init(allocator);
+        defer old_hash_by_id.deinit();
+        for (pre_merge) |a| try old_hash_by_id.put(a.id, a.hash);
+        var mit = atoms_by_id.iterator();
+        while (mit.next()) |kv| {
+            const a = kv.value_ptr;
+            if (std.mem.eql(u8, a.origin, "merge")) continue;
+            const old_hash = old_hash_by_id.get(a.id);
+            if (old_hash != null and std.mem.eql(u8, old_hash.?, a.hash)) continue;
+            const m_orig = try allocator.dupe(u8, "merge");
+            if (a.origin.len > 0) allocator.free(a.origin);
+            a.origin = m_orig;
+        }
+    }
+
+    // Count files whose stored atoms src never received — everything still
+    // marked `origin = "merge"` in the final table, not just the ops this
+    // merge emitted.
+    var unmaterialized_files = std.StringHashMap(void).init(allocator);
+    defer unmaterialized_files.deinit();
+    var uit = atoms_by_id.iterator();
+    while (uit.next()) |kv| {
+        const a = kv.value_ptr;
+        if (std.mem.eql(u8, a.origin, "merge") and a.span.file.len > 0) {
+            try unmaterialized_files.put(a.span.file, {});
+        }
+    }
+    const unmaterialized_count = unmaterialized_files.count();
 
     var updated_atoms: std.ArrayList(store.StoredAtom) = .empty;
     defer updated_atoms.deinit(allocator);

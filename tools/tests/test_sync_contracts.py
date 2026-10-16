@@ -321,6 +321,33 @@ class SyncContractTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("refuse change_missing", result.stdout + result.stderr)
 
+    def test_merge_after_reset_guards_unmaterialized_source(self):
+        """flint-client#72: stale src must refuse src_behind, not silently revert."""
+        b = self.receiver("b")
+        self.ok(b, "keygen", "--name=b")
+
+        def edit(store, src, alpha, beta):
+            (src / "main.zig").write_text(
+                f"pub const alpha: u32 = {alpha};\npub const beta: u32 = {beta};\n")
+            self.ok(store, "add")
+            self.ok(store, "commit", "-m=independent-edit")
+
+        edit(self.author, self.source, 2, 10)
+        edit(b, self.root / "b-src", 1, 20)
+        self.push()
+        for args in [("fork", "main", "saved-b"),
+                     ("pull", "--reset", f"--remote={self.remote}"),
+                     ("merge", "saved-b"),
+                     ("push", f"--remote={self.remote}")]:
+            self.ok(b, *args)
+
+        # B's src still holds its pre-recovery bytes (alpha=1); `add` must
+        # refuse rather than stage a silent revert of A's accepted edit.
+        result = self.run_client(b, "add")
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("src_behind", result.stdout + result.stderr)
+        self.ok(b, "verify", "--all")
+
     def test_version_revision_is_additive_and_needs_no_store(self):
         absent = object()
         for value in (absent, None, "future", True, -1, 1.25, 4294967296, 0, 42):
