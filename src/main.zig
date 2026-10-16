@@ -111,11 +111,12 @@ fn printHelp(w: *Io.Writer) void {
         \\  push [--remote=<url>] [--stream=<s>] [--ws=<n>] [--auth-key=<file>]
         \\  pull [--remote=<url>] [--stream=<s>] [--ws=<n>] [--auth-key=<file>] [--reset]
         \\  checkout [--stream=<s>] [--ws=<n>] --change=<id>|--head --into=<dir> [--force]
-        \\  handoff propose|attest|accept|supersede|withdraw|list|inspect|verify …
+        \\  handoff propose|attest|accept|supersede|withdraw|list|inspect|export|import|verify …
         \\    propose --stream=<t> --work=<s> [--candidate=<id>] [--base=<id>] [--snapshot=<ref>] -m=<i> [--scope-file=<f>] [--validations=<f>] [--key=<k>]
         \\    attest <handoff> --command=<s> --result=pass|fail|skip [--key=<k>]
         \\    accept|supersede|withdraw <handoff> [--note=<s>] [--replacement=<id>] [--key=<k>]
         \\    list [--stream=<s>] [--state=<s>] · inspect <handoff> · verify <file>
+        \\    export <handoff> --out=<file> [--with-changes] · import <file>
         \\  release --elf=<f> --name=<n> --version=<v> [--manifest-row=<r>] [--ws=<n>] [--key=<k>] [-m <msg>] [--dry-run]
         \\  parse-corpus <dir>
         \\  keygen [--name=<n>]

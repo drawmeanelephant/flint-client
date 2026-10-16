@@ -337,7 +337,11 @@ pub const HostFS = struct {
         const self: *HostFS = @ptrCast(@alignCast(ptr));
         const parent = dirName(path);
         if (parent.len > 0 and !std.mem.eql(u8, parent, ".") and !std.mem.eql(u8, parent, "/")) {
-            try Io.Dir.createDirPath(.cwd(), self.io, parent);
+            // Skip when the parent already resolves to a directory —
+            // createDirPath refuses ENOTDIR on symlinked dirs (e.g. /tmp).
+            if (!isDirImpl(ptr, allocator, parent)) {
+                try Io.Dir.createDirPath(.cwd(), self.io, parent);
+            }
         }
 
         var rand_u64: u64 = 0;
@@ -392,11 +396,12 @@ pub const HostFS = struct {
     }
 
     fn appendSyncImpl(ptr: *anyopaque, allocator: Allocator, path: []const u8, data: []const u8) anyerror!void {
-        _ = allocator;
         const self: *HostFS = @ptrCast(@alignCast(ptr));
         const parent = dirName(path);
         if (parent.len > 0 and !std.mem.eql(u8, parent, ".") and !std.mem.eql(u8, parent, "/")) {
-            try Io.Dir.createDirPath(.cwd(), self.io, parent);
+            if (!isDirImpl(ptr, allocator, parent)) {
+                try Io.Dir.createDirPath(.cwd(), self.io, parent);
+            }
         }
 
         const file = try Io.Dir.createFile(.cwd(), self.io, path, .{
