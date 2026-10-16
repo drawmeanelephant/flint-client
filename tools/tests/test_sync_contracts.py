@@ -250,6 +250,37 @@ class SyncContractTests(unittest.TestCase):
         self.assertEqual(self.log(receiver), source)
         self.ok(receiver, "verify", "--all")
 
+    def test_clean_merge_after_reset_updates_workspace_atoms(self):
+        """flint-client#64: a clean merge must leave ATOMS describing the merged head."""
+        b = self.receiver("b")
+        self.ok(b, "keygen", "--name=b")
+
+        def edit(store, src, alpha, beta):
+            (src / "main.zig").write_text(
+                f"pub const alpha: u32 = {alpha};\npub const beta: u32 = {beta};\n")
+            self.ok(store, "add")
+            self.ok(store, "commit", "-m=independent-edit")
+
+        edit(self.author, self.source, 2, 10)
+        edit(b, self.root / "b-src", 1, 20)
+        self.push()
+        for args in [("fork", "main", "saved-b"),
+                     ("pull", "--reset", f"--remote={self.remote}"),
+                     ("merge", "saved-b"),
+                     ("push", f"--remote={self.remote}")]:
+            self.ok(b, *args)
+
+        def atoms(store):
+            return {a["name"]: a["hash"]
+                    for line in (store / "ws/main/ATOMS.jsonl").read_text().splitlines()
+                    for a in [json.loads(line)]}
+
+        # A pre-fix workspace table still described alpha=1 while the merged
+        # head's signed history has alpha=2 — compare against a fresh clone.
+        c = self.receiver("c")
+        self.assertEqual(atoms(b), atoms(c))
+        self.assertEqual({"main.alpha", "main.beta"}, set(atoms(b)))
+
     def test_version_revision_is_additive_and_needs_no_store(self):
         absent = object()
         for value in (absent, None, "future", True, -1, 1.25, 4294967296, 0, 42):

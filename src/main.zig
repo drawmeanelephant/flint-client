@@ -442,7 +442,7 @@ test {
     _ = merge;
     _ = sync;
     _ = release;
-    _ = @import("sync_mutate_test.zig");
+    _ = @import("sync_scenarios_test.zig");
 }
 
 pub const TestHarness = struct {
