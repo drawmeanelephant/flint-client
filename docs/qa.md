@@ -64,6 +64,25 @@ reproduce the publisher's tree byte-identically from FLINT content alone:
 FLINTD=/path/to/flint-server/zig-out/bin/flintd python3 tools/content_sync_journey.py
 ```
 
+The mutating-proxy hostile-server suite uses the same `FLINTD` discovery:
+
+```sh
+FLINTD=/path/to/flint-server/zig-out/bin/flintd python3 tools/hostile_server.py
+```
+
+Its 43 clone/pull/push scenarios corrupt, truncate, delay, or lie in server
+replies; every scenario must end in a refusal (never a crash, hang, or
+silent acceptance), and a failed clone/pull must leave the local store
+verifiable and unchanged. Expected final line: `43 scenarios, 0 failed`.
+`tools/check.py` runs the suite through its tooling-test phase whenever a
+flintd resolves and reports an explicit skip otherwise, so a green local
+run without a server does not claim real-server coverage. CI checks out and
+builds the flint-server commit pinned in `tools/flint-server-pin.txt`, so
+CI runs always cover real-server sync. A failed scenario retains its
+`flint-hostile-*` temp store and prints the path; clean runs remove it.
+Scenarios reproducing a tracked issue are marked `KNOWN` in the suite and
+fail the run once fixed, forcing marker removal.
+
 For an existing, explicitly authorized external flintd, configure
 `FLINT_REMOTE=tcp://host:port` and a private key-file path in
 `FLINT_AUTH_KEY`, using that server's documented auth/author policy.

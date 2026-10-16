@@ -78,8 +78,10 @@ class SyncContractTests(unittest.TestCase):
         self.server.stderr.close()
 
     def run_client(self, store, *args):
+        # 240s (not 60s): cloning a near-maximum-atom log on a throttled CI
+        # runner legitimately exceeds a minute in a debug build (#60).
         return subprocess.run([str(CLIENT), f"--store={store}", *args], env=self.env,
-                              capture_output=True, text=True, timeout=60)
+                              capture_output=True, text=True, timeout=240)
 
     def ok(self, store, *args):
         result = self.run_client(store, *args)

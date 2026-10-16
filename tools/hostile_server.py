@@ -13,6 +13,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import socket
 import subprocess
 import sys
@@ -24,17 +25,23 @@ ROOT = Path(__file__).resolve().parents[1]
 FLINT = ROOT / "zig-out" / "bin" / "flint"
 FLINTD = Path(os.environ.get("FLINTD", ROOT.parent / "flint-server" / "zig-out" / "bin" / "flintd"))
 TIMEOUT = 8  # seconds a client invocation may take before it counts as hung
+# Inherited FLINT_* variables must not steer the client or the spawned server.
+ENV = {k: v for k, v in os.environ.items() if not k.startswith("FLINT_")}
 
 # Scenarios that reproduce a tracked issue report KNOWN; once fixed they fail the
 # run so the marker gets removed.
-KNOWN = {}
+KNOWN = {
+    "clone: duplicated changes": "#99",
+    "pull: duplicated changes": "#99",
+}
 RESULTS = []
 
 
 def flint(*args):
     started = time.time()
     try:
-        p = subprocess.run([str(FLINT), *map(str, args)], capture_output=True, text=True, timeout=TIMEOUT)
+        p = subprocess.run([str(FLINT), *map(str, args)], env=ENV,
+                           capture_output=True, text=True, timeout=TIMEOUT)
         return p.returncode, p.stdout + p.stderr, time.time() - started
     except subprocess.TimeoutExpired:
         return "HANG", "", time.time() - started
@@ -156,14 +163,23 @@ CLONE_ONLY = [
 class Fixture:
     def __init__(self):
         self.tmp = Path(tempfile.mkdtemp(prefix="flint-hostile-"))
-        subprocess.run([str(FLINTD), "init", f"--store={self.tmp / 'srv'}"], check=True, capture_output=True)
+        self.server = None
+        try:
+            self.setup()
+        except BaseException:
+            self.close()
+            raise
+
+    def setup(self):
+        subprocess.run([str(FLINTD), "init", f"--store={self.tmp / 'srv'}"],
+                       env=ENV, check=True, capture_output=True)
         probe = socket.socket()
         probe.bind(("127.0.0.1", 0))
         self.port = probe.getsockname()[1]
         probe.close()
         self.server = subprocess.Popen(
             [str(FLINTD), "serve", f"--store={self.tmp / 'srv'}", f"--listen=127.0.0.1:{self.port}", "--read-timeout=5"],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            env=ENV, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         for _ in range(50):
             try:
                 socket.create_connection(("127.0.0.1", self.port), timeout=0.2).close()
@@ -192,9 +208,14 @@ class Fixture:
         (path / "src").mkdir(parents=True)
         return path
 
-    def close(self):
-        self.server.terminate()
-        self.server.wait()
+    def close(self, keep=False):
+        if self.server is not None:
+            self.server.terminate()
+            self.server.wait()
+        if keep:
+            print("kept temp store for inspection: %s" % self.tmp)
+        else:
+            shutil.rmtree(self.tmp, ignore_errors=True)
 
 
 def tree(path):
@@ -326,12 +347,23 @@ def push_hang(fx):
     record("push: silent server on hello", rc != "HANG", "hung >%ds" % TIMEOUT)
 
 
+def spec_rev(port):
+    """Hello the spawned flintd so the log records which spec_rev was tested."""
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=5) as conn:
+            conn.sendall(enc({"op": "hello", "seq": 1, "proto": "FLINT-SYNC/1"}))
+            return json.loads(conn.makefile("rb").readline()).get("spec_rev", "?")
+    except (OSError, ValueError):
+        return "?"
+
+
 def main():
     for path in (FLINT, FLINTD):
         if not path.exists():
             print("missing binary: %s (zig build; set FLINTD)" % path, file=sys.stderr)
             return 2
     fx = Fixture()
+    print("flint=%s\nflintd=%s spec_rev=%s" % (FLINT, FLINTD, spec_rev(fx.port)))
     try:
         for title, op, mutate, must in SCENARIOS:
             run_scenario(fx, "clone", title, op, mutate, must)
@@ -345,7 +377,8 @@ def main():
         pull_padded_pages(fx)
         push_hang(fx)
     finally:
-        fx.close()
+        # A failed run keeps its store for inspection; a clean run removes it.
+        fx.close(keep=sys.exc_info()[0] is not None or any(not ok for _, ok in RESULTS))
     failed = [n for n, ok in RESULTS if not ok]
     print("\n%d scenarios, %d failed" % (len(RESULTS), len(failed)))
     return 1 if failed else 0

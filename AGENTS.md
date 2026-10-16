@@ -38,6 +38,14 @@ zig build test --summary all
 python3 tools/qa.py
 ```
 
+The lint phase also runs `tools/tests/` unit tests, including the
+real-server suites: when a flintd binary resolves (`FLINTD=<path>` or a
+sibling `../flint-server/zig-out/bin/flintd` build), discovery runs the
+sync-contract tests and the mutating-proxy suite in
+`tools/hostile_server.py` (43 clone/pull/push scenarios); without one they
+skip with an explicit reason. CI builds the server commit pinned in
+`tools/flint-server-pin.txt`, so CI always exercises real-server sync.
+
 For a narrow test, use `zig test src/main.zig --test-filter 'stage fold rules'`.
 `zig fmt build.zig build.zig.zon src` applies formatting. Never format the
 conformance corpus: some fixture files intentionally contain invalid syntax.
