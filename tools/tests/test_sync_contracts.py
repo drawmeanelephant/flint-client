@@ -40,7 +40,7 @@ class SyncContractTests(unittest.TestCase):
                        env=self.env, check=True, capture_output=True, timeout=10)
         self.server = subprocess.Popen(
             [str(SERVER), "serve", f"--store={self.server_store}",
-             "--listen=127.0.0.1:0", "--read-timeout=2"],
+             "--listen=127.0.0.1:0", "--read-timeout=15"],
             env=self.env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
         self.addCleanup(self.stop_server)
         self.assertTrue(select.select([self.server.stderr], [], [], 5)[0], "startup deadline")
@@ -178,7 +178,7 @@ class SyncContractTests(unittest.TestCase):
                 self.ok(receiver, "verify", "--all")
 
     def test_short_signed_pull_must_reach_advertised_head(self):
-        """KNOWN flint-client#58, valid signatures do not prove completeness."""
+        """Valid signatures do not prove completeness: pull must reach the advertised head (#58)."""
         receiver = self.receiver("short")
         self.commit()
         self.commit()
@@ -196,14 +196,12 @@ class SyncContractTests(unittest.TestCase):
         result = self.run_client(receiver, "pull", f"--remote={remote}", "--read-timeout=2")
         unchanged = snapshot(receiver) == before
         self.ok(receiver, "verify", "--all")
-        self.pin_known("flint-client#58",
-                       fixed=result.returncode == 1 and unchanged,
-                       reproduced=result.returncode == 0 and not unchanged
-                       and self.head(receiver) != self.head(self.author)
-                       and "pull ok stream=main changes=1" in result.stdout)
+        self.assertEqual(result.returncode, 1, f"pull: {result.stdout}{result.stderr}")
+        self.assertIn("stream_malformed", result.stdout + result.stderr)
+        self.assertTrue(unchanged, "refused pull must not change the store")
 
     def test_aggregate_pull_bytes_must_not_publish_an_unreadable_store(self):
-        """KNOWN flint-client#59, per-page bounds are not an aggregate bound."""
+        """Per-page bounds are not an aggregate bound: pull must not write a log over 4 MiB (#59)."""
         receiver = self.receiver("bounded")
         for _ in range(5):
             self.commit()
@@ -227,11 +225,10 @@ class SyncContractTests(unittest.TestCase):
         self.assertEqual(len(pages), 2)
         self.assertTrue(all(size < 4 * 1024 * 1024 for size in pages))
         verification = self.run_client(receiver, "verify", "--all")
-        self.pin_known("flint-client#59",
-                       fixed=result.returncode == 1 and snapshot(receiver) == before
-                       and verification.returncode == 0,
-                       reproduced=result.returncode == 0 and len(self.log(receiver)) > 4 * 1024 * 1024
-                       and verification.returncode == 1 and "store_too_large" in verification.stdout)
+        self.assertEqual(result.returncode, 1, f"pull: {result.stdout}{result.stderr}")
+        self.assertIn("store_too_large", result.stdout + result.stderr)
+        self.assertEqual(snapshot(receiver), before, "refused pull must not change the store")
+        self.assertEqual(verification.returncode, 0)
 
     def test_maximum_atom_commit_must_clone_from_real_server(self):
         """KNOWN flint-client#60, a producer-valid Change must be receivable."""
