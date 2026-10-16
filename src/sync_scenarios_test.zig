@@ -384,3 +384,132 @@ test "maximum-atom commit pushes and clones: >1 MiB change under the 4 MiB line 
         try std.testing.expect(std.mem.indexOf(u8, vres.out, "sig: verified\n") != null);
     }
 }
+test "clean merge after pull --reset rebuilds the workspace Atom table from history (#64)" {
+    const gpa = std.testing.allocator;
+
+    var srv_mem = try fsys.MemFS.init(gpa);
+    defer srv_mem.deinit();
+    const srv_fs = srv_mem.fs();
+    try srv_fs.mkdir(gpa, "/srv/FLINT/streams");
+
+    var server = sync.InProcServer{
+        .allocator = gpa,
+        .fs = srv_fs,
+        .store_root = "/srv/FLINT",
+    };
+
+    var ha = try TestHarness.init(gpa);
+    defer ha.deinit();
+    ha.env_sign_key = rfc8032_seed_hex;
+    ha.sync_dial = sync.InProcServer.dial;
+    ha.sync_dial_ctx = &server;
+    const fsa = ha.mem.fs();
+
+    const base_src = "pub const alpha: u32 = 1;\npub const beta: u32 = 10;\n";
+    try fsa.writeFileSafe(gpa, "/host/SRCA/main.zig", base_src);
+    for ([_][]const []const u8{
+        &.{ "init", "--name=a", "--src=/host/SRCA" },
+        &.{ "add", "/host/SRCA" },
+        &.{ "commit", "-m", "base" },
+        &.{ "push", "--remote=tcp://127.0.0.1:4748" },
+    }) |cmd| {
+        const res = try ha.runCmd(cmd);
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+    }
+
+    var hb = try TestHarness.init(gpa);
+    defer hb.deinit();
+    hb.env_sign_key = rfc8032_seed_hex;
+    hb.rng_seed = 77;
+    hb.sync_dial = sync.InProcServer.dial;
+    hb.sync_dial_ctx = &server;
+    const fsb = hb.mem.fs();
+
+    {
+        const res = try hb.runCmd(&.{
+            "clone",
+            "tcp://127.0.0.1:4748",
+            "--stream=main",
+            "--name=b",
+            "--src=/host/SRCB",
+        });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+    }
+
+    // A commits alpha=2 and pushes; B commits beta=20 locally — divergent.
+    try fsa.writeFileSafe(gpa, "/host/SRCA/main.zig", "pub const alpha: u32 = 2;\npub const beta: u32 = 10;\n");
+    ha.now += 5;
+    for ([_][]const []const u8{
+        &.{ "add", "/host/SRCA" },
+        &.{ "commit", "-m", "alpha=2" },
+        &.{"push"},
+    }) |cmd| {
+        const res = try ha.runCmd(cmd);
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+    }
+
+    try fsb.writeFileSafe(gpa, "/host/SRCB/main.zig", "pub const alpha: u32 = 1;\npub const beta: u32 = 20;\n");
+    hb.now += 3;
+    for ([_][]const []const u8{
+        &.{ "add", "/host/SRCB" },
+        &.{ "commit", "-m", "beta=20" },
+    }) |cmd| {
+        const res = try hb.runCmd(cmd);
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+    }
+
+    // Documented recovery: fork aside, reset main to remote, merge the fork
+    // back, push. The merge is clean (disjoint atoms).
+    for ([_][]const []const u8{
+        &.{ "fork", "main", "saved-b" },
+        &.{ "pull", "--reset", "--remote=tcp://127.0.0.1:4748" },
+        &.{ "merge", "saved-b" },
+        &.{"push"},
+    }) |cmd| {
+        const res = try hb.runCmd(cmd);
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+    }
+
+    // The workspace Atom table must match the merged head's replayed state,
+    // not the pre-reset divergent head — both edits present.
+    var idx = try store.loadStoreIndex(gpa, fsb, hb.root);
+    defer idx.deinit();
+    // `loadAllStreamChanges` reloads and frees the index's Stream records —
+    // copy the head before calling it.
+    const merged_head = try gpa.dupe(u8, idx.streamByName("main").?.head.?);
+    defer gpa.free(merged_head);
+
+    const ws_atoms = try store.loadWorkspaceAtoms(gpa, fsb, hb.root, "b");
+    defer store.freeStoredAtoms(gpa, ws_atoms);
+    const all_changes = try store.loadAllStreamChanges(gpa, fsb, hb.root, &idx);
+    defer store.freeChanges(gpa, all_changes);
+    const replayed = try store.replayStreamAtoms(gpa, merged_head, all_changes);
+    defer store.freeStoredAtoms(gpa, replayed.atoms);
+
+    const S = struct {
+        fn map(allocator: Allocator, atoms: []const store.StoredAtom) !std.StringHashMap([]const u8) {
+            var m = std.StringHashMap([]const u8).init(allocator);
+            for (atoms) |a| try m.put(a.name, a.hash);
+            return m;
+        }
+    };
+    var ws_map = try S.map(gpa, ws_atoms);
+    defer ws_map.deinit();
+    var rp_map = try S.map(gpa, replayed.atoms);
+    defer rp_map.deinit();
+
+    try std.testing.expectEqual(rp_map.count(), ws_map.count());
+    var it = rp_map.iterator();
+    while (it.next()) |kv| {
+        const wv = ws_map.get(kv.key_ptr.*) orelse {
+            std.debug.print("missing atom in ws table: {s}\n", .{kv.key_ptr.*});
+            return error.TestUnexpectedResult;
+        };
+        try std.testing.expectEqualStrings(kv.value_ptr.*, wv);
+    }
+}
