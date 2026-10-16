@@ -333,12 +333,21 @@ pub const HostFS = struct {
         return data;
     }
 
-    fn writeFileSafeImpl(ptr: *anyopaque, allocator: Allocator, path: []const u8, data: []const u8) anyerror!void {
+    /// Ensures `path`'s parent directory exists, skipping `createDirPath`
+    /// when it already resolves to one — its not-following stat reports
+    /// NotDir on a symlinked leaf (e.g. /tmp -> /private/tmp on macOS).
+    fn ensureParentDir(ptr: *anyopaque, allocator: Allocator, path: []const u8) anyerror!void {
         const self: *HostFS = @ptrCast(@alignCast(ptr));
         const parent = dirName(path);
-        if (parent.len > 0 and !std.mem.eql(u8, parent, ".") and !std.mem.eql(u8, parent, "/")) {
+        if (parent.len == 0 or std.mem.eql(u8, parent, ".") or std.mem.eql(u8, parent, "/")) return;
+        if (!isDirImpl(ptr, allocator, parent)) {
             try Io.Dir.createDirPath(.cwd(), self.io, parent);
         }
+    }
+
+    fn writeFileSafeImpl(ptr: *anyopaque, allocator: Allocator, path: []const u8, data: []const u8) anyerror!void {
+        const self: *HostFS = @ptrCast(@alignCast(ptr));
+        try ensureParentDir(ptr, allocator, path);
 
         var rand_u64: u64 = 0;
         self.io.random(std.mem.asBytes(&rand_u64));
@@ -369,10 +378,7 @@ pub const HostFS = struct {
         if (existsImpl(ptr, allocator, path)) {
             return refuse("key_exists", "");
         }
-        const parent = dirName(path);
-        if (parent.len > 0 and !std.mem.eql(u8, parent, ".") and !std.mem.eql(u8, parent, "/")) {
-            try Io.Dir.createDirPath(.cwd(), self.io, parent);
-        }
+        try ensureParentDir(ptr, allocator, path);
 
         const file = Io.Dir.createFile(.cwd(), self.io, path, .{
             .exclusive = true,
@@ -392,12 +398,8 @@ pub const HostFS = struct {
     }
 
     fn appendSyncImpl(ptr: *anyopaque, allocator: Allocator, path: []const u8, data: []const u8) anyerror!void {
-        _ = allocator;
         const self: *HostFS = @ptrCast(@alignCast(ptr));
-        const parent = dirName(path);
-        if (parent.len > 0 and !std.mem.eql(u8, parent, ".") and !std.mem.eql(u8, parent, "/")) {
-            try Io.Dir.createDirPath(.cwd(), self.io, parent);
-        }
+        try ensureParentDir(ptr, allocator, path);
 
         const file = try Io.Dir.createFile(.cwd(), self.io, path, .{
             .truncate = false,
@@ -411,11 +413,12 @@ pub const HostFS = struct {
     }
 
     fn mkdirImpl(ptr: *anyopaque, allocator: Allocator, path: []const u8) anyerror!void {
-        _ = allocator;
         const self: *HostFS = @ptrCast(@alignCast(ptr));
         const clean = cleanMemPath(path);
         if (clean.len == 0 or std.mem.eql(u8, clean, ".") or std.mem.eql(u8, clean, "/")) return;
-        try Io.Dir.createDirPath(.cwd(), self.io, clean);
+        if (!isDirImpl(ptr, allocator, clean)) {
+            try Io.Dir.createDirPath(.cwd(), self.io, clean);
+        }
     }
 
     fn listImpl(ptr: *anyopaque, allocator: Allocator, path: []const u8) anyerror![]DirEntry {

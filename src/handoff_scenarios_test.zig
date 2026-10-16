@@ -723,6 +723,46 @@ fn countOccurrences(haystack: []const u8, needle: []const u8) usize {
     return n;
 }
 
+/// Copies `src_rel` (a file or directory, recursively) between two harness
+/// stores — the offline "receiver already pulled" half of the §9 flow.
+fn copyStorePath(
+    gpa: Allocator,
+    src_fs: fsys.FS,
+    dst_fs: fsys.FS,
+    src_root: []const u8,
+    dst_root: []const u8,
+    rel: []const u8,
+) !void {
+    const sp = try fsys.joinPath(gpa, &.{ src_root, rel });
+    defer gpa.free(sp);
+    const dp = try fsys.joinPath(gpa, &.{ dst_root, rel });
+    defer gpa.free(dp);
+    if (!src_fs.exists(gpa, sp)) return;
+    if (src_fs.isDir(gpa, sp)) {
+        try dst_fs.mkdir(gpa, dp);
+        const entries = try src_fs.list(gpa, sp);
+        defer fsys.FS.freeDirEntries(gpa, entries);
+        for (entries) |e| {
+            const child = try fsys.joinPath(gpa, &.{ rel, e.name });
+            defer gpa.free(child);
+            try copyStorePath(gpa, src_fs, dst_fs, src_root, dst_root, child);
+        }
+    } else {
+        const b = try src_fs.readFile(gpa, sp, store.MaxFileReadBytes);
+        defer gpa.free(b);
+        try dst_fs.writeFileSafe(gpa, dp, b);
+    }
+}
+
+/// Copies one stream's record plus log between harness stores.
+fn copyStream(gpa: Allocator, src_fs: fsys.FS, dst_fs: fsys.FS, src_root: []const u8, dst_root: []const u8, sid: []const u8) !void {
+    for ([_][]const u8{ "json", "jsonl" }) |ext| {
+        const rel = try std.fmt.allocPrint(gpa, "streams/{s}.{s}", .{ sid, ext });
+        defer gpa.free(rel);
+        try copyStorePath(gpa, src_fs, dst_fs, src_root, dst_root, rel);
+    }
+}
+
 test "handoff: export → verify → import packet round-trips records and ancestry" {
     const gpa = std.testing.allocator;
     var h = try TestHarness.init(gpa);
@@ -842,4 +882,216 @@ test "handoff: import refuses a tampered packet and writes nothing" {
     try std.testing.expectEqual(@as(u8, 1), res.rc);
     try std.testing.expect(std.mem.indexOf(u8, res.out, "sig_invalid") != null);
     try std.testing.expect(!mfs.exists(gpa, log_path));
+}
+
+test "handoff: import creates the work stream with verified forked_from ancestry" {
+    const gpa = std.testing.allocator;
+    var h = try TestHarness.init(gpa);
+    defer h.deinit();
+    h.env_sign_key = rfc8032_seed_hex;
+    const mfs = h.mem.fs();
+
+    const base = try setupTwoStreams(h, gpa, mfs);
+    defer gpa.free(base);
+    const sid = try streamIdByName(gpa, mfs, h.root, "main");
+    defer gpa.free(sid);
+    const awid = try streamIdByName(gpa, mfs, h.root, "a-work");
+    defer gpa.free(awid);
+
+    const p_out = try runOut(h, gpa, &.{
+        "handoff", "propose", "--stream=main", "--work=a-work", "-m", "fork data",
+    }, 0);
+    defer gpa.free(p_out);
+    const hid = try handoffId(gpa, p_out);
+    defer gpa.free(hid);
+
+    try runExpect(h, gpa, &.{
+        "handoff", "export", hid, "--out=/host/packet.ndjson", "--with-changes",
+    }, 0);
+    const packet = try mfs.readFile(gpa, "/host/packet.ndjson", store.MaxFileReadBytes);
+    defer gpa.free(packet);
+
+    // Receiver holds main only — the packet's header creates `a-work`.
+    var h2 = try TestHarness.init(gpa);
+    defer h2.deinit();
+    const mfs2 = h2.mem.fs();
+    try copyStream(gpa, mfs, mfs2, h.root, h2.root, sid);
+    try mfs2.writeFileSafe(gpa, "/host/packet.ndjson", packet);
+
+    {
+        const out = try runOut(h2, gpa, &.{ "handoff", "import", "/host/packet.ndjson" }, 0);
+        defer gpa.free(out);
+        try std.testing.expect(std.mem.indexOf(u8, out, "records=1 changes=1") != null);
+    }
+
+    // The created stream record carries the verified fork point: the first
+    // bundled Change's parent resolved against main's held log (§7).
+    {
+        var idx2 = try store.loadStoreIndex(gpa, mfs2, h2.root);
+        defer idx2.deinit();
+        const w = idx2.streamByID(awid).?;
+        try std.testing.expectEqualStrings("a-work", w.name);
+        try std.testing.expectEqualStrings(sid, w.forked_from.?.stream);
+        try std.testing.expectEqualStrings(base, w.forked_from.?.change);
+        try std.testing.expect(w.head == null);
+    }
+
+    // The imported proposal resolves through the deposit — verifiable, not
+    // unresolvable. Captured content is absent, so the honest verdict stays
+    // incomplete rather than silently ready.
+    {
+        const out = try runOut(h2, gpa, &.{ "handoff", "inspect", hid }, 0);
+        defer gpa.free(out);
+        try std.testing.expect(std.mem.indexOf(u8, out, "state=proposed verdict=incomplete") != null);
+        try std.testing.expect(std.mem.indexOf(u8, out, "scope=honest") != null);
+        try std.testing.expect(std.mem.indexOf(u8, out, "sig=verified") != null);
+    }
+}
+
+test "handoff: import of a genesis bundle creates the work stream without fork data" {
+    const gpa = std.testing.allocator;
+    var host_fs = fsys.HostFS.init(std.testing.io);
+    const fs = host_fs.fs();
+
+    var h = try TestHarness.init(gpa);
+    defer h.deinit();
+    const mfs = h.mem.fs();
+
+    const target_id = "019a0000-0001-7000-8000-0000000000aa";
+    const work_id = "019a0000-0002-7000-8000-0000000000bb";
+
+    // The receiver holds the target stream record but neither the work
+    // stream nor the base Change — the records land, ancestry stays
+    // honestly incomplete.
+    const st = store.Stream{
+        .id = target_id,
+        .name = "main",
+        .head = null,
+        .created = 1760000000000,
+        .forked_from = null,
+    };
+    const rec_path = try store.streamRecordPath(gpa, h.root, target_id);
+    defer gpa.free(rec_path);
+    {
+        const line = try json.marshalStreamLine(gpa, st);
+        defer gpa.free(line);
+        try mfs.writeFileSafe(gpa, rec_path, line);
+    }
+
+    const raw = try fs.readFile(gpa, "testdata/handoffs/packet.ndjson", store.MaxFileReadBytes);
+    defer gpa.free(raw);
+    try mfs.writeFileSafe(gpa, "/host/fix/packet.ndjson", raw);
+
+    {
+        const out = try runOut(h, gpa, &.{ "handoff", "import", "/host/fix/packet.ndjson" }, 0);
+        defer gpa.free(out);
+        try std.testing.expectEqualStrings(
+            "flint: handoff import 019a0000-0006-7000-8000-000000000010 records=2 changes=2\n",
+            out,
+        );
+    }
+
+    // Genesis chain: the first bundled Change has no parent, so the created
+    // work stream carries no fork origin and no head movement.
+    {
+        var idx = try store.loadStoreIndex(gpa, mfs, h.root);
+        defer idx.deinit();
+        const w = idx.streamByID(work_id).?;
+        try std.testing.expectEqualStrings("a-work", w.name);
+        try std.testing.expect(w.forked_from == null);
+        try std.testing.expect(w.head == null);
+    }
+    {
+        const out = try runOut(h, gpa, &.{ "handoff", "inspect", "019a0000-0006-7000-8000-000000000010" }, 0);
+        defer gpa.free(out);
+        try std.testing.expect(std.mem.indexOf(u8, out, "verdict=incomplete") != null);
+        try std.testing.expect(std.mem.indexOf(u8, out, "sig=verified") != null);
+    }
+}
+
+test "handoff: import into an existing destination dir through a symlink on HostFS" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+
+    // Build and export the packet on MemFS, then replay the import against
+    // the host filesystem where the `handoffs` destination is a symlink to
+    // a real directory — createDirPath's not-following stat would report
+    // NotDir on that leaf (e.g. /tmp -> /private/tmp on macOS).
+    var h = try TestHarness.init(gpa);
+    defer h.deinit();
+    h.env_sign_key = rfc8032_seed_hex;
+    const mfs = h.mem.fs();
+
+    const base = try setupTwoStreams(h, gpa, mfs);
+    gpa.free(base);
+    const sid = try streamIdByName(gpa, mfs, h.root, "main");
+    defer gpa.free(sid);
+    const p_out = try runOut(h, gpa, &.{
+        "handoff", "propose", "--stream=main", "--work=a-work", "-m", "hostfs import",
+    }, 0);
+    defer gpa.free(p_out);
+    const hid = try handoffId(gpa, p_out);
+    defer gpa.free(hid);
+    try runExpect(h, gpa, &.{
+        "handoff", "export", hid, "--out=/host/packet.ndjson", "--with-changes",
+    }, 0);
+    const packet = try mfs.readFile(gpa, "/host/packet.ndjson", store.MaxFileReadBytes);
+    defer gpa.free(packet);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var rbuf: [4096]u8 = undefined;
+    const tmp_abs = rbuf[0..try tmp.dir.realPath(io, &rbuf)];
+
+    var host_fs = fsys.HostFS.init(io);
+    const fs = host_fs.fs();
+
+    const store_dir = try std.fmt.allocPrint(gpa, "{s}/store", .{tmp_abs});
+    defer gpa.free(store_dir);
+    const streams_dir = try std.fmt.allocPrint(gpa, "{s}/streams", .{store_dir});
+    defer gpa.free(streams_dir);
+    try fs.mkdir(gpa, streams_dir);
+    for ([_][]const u8{ "json", "jsonl" }) |ext| {
+        const rel = try std.fmt.allocPrint(gpa, "{s}/streams/{s}.{s}", .{ h.root, sid, ext });
+        defer gpa.free(rel);
+        const b = try mfs.readFile(gpa, rel, store.MaxFileReadBytes);
+        defer gpa.free(b);
+        const dst = try std.fmt.allocPrint(gpa, "{s}/{s}.{s}", .{ streams_dir, sid, ext });
+        defer gpa.free(dst);
+        try fs.writeFileSafe(gpa, dst, b);
+    }
+
+    const real_handoffs = try std.fmt.allocPrint(gpa, "{s}/real-handoffs", .{tmp_abs});
+    defer gpa.free(real_handoffs);
+    try fs.mkdir(gpa, real_handoffs);
+    const handoffs_link = try std.fmt.allocPrint(gpa, "{s}/handoffs", .{store_dir});
+    defer gpa.free(handoffs_link);
+    try std.Io.Dir.symLink(.cwd(), io, real_handoffs, handoffs_link, .{});
+
+    const pkt_path = try std.fmt.allocPrint(gpa, "{s}/packet.ndjson", .{tmp_abs});
+    defer gpa.free(pkt_path);
+    try fs.writeFileSafe(gpa, pkt_path, packet);
+
+    var out_w: std.Io.Writer.Allocating = .init(gpa);
+    defer out_w.deinit();
+    var err_w: std.Io.Writer.Allocating = .init(gpa);
+    defer err_w.deinit();
+    const ctx = main.Context{
+        .allocator = gpa,
+        .io = io,
+        .fs = fs,
+        .stdout = &out_w.writer,
+        .stderr = &err_w.writer,
+        .cwd = tmp_abs,
+        .env_flint_store = store_dir,
+    };
+    try std.testing.expectEqual(@as(u8, 0), main.runWithContext(ctx, &.{ "handoff", "import", pkt_path }));
+    try std.testing.expect(std.mem.indexOf(u8, out_w.written(), "records=1 changes=1") != null);
+
+    // The log landed inside the real directory through the symlink.
+    const log_path = try std.fmt.allocPrint(gpa, "{s}/{s}.jsonl", .{ real_handoffs, sid });
+    defer gpa.free(log_path);
+    const written = try fs.readFile(gpa, log_path, store.MaxFileReadBytes);
+    defer gpa.free(written);
+    try std.testing.expect(written.len > 0);
 }

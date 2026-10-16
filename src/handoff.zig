@@ -2030,23 +2030,39 @@ fn cmdImport(
     // earlier in this section.
     var changes: std.ArrayList(store.Change) = .empty;
     var known = std.StringHashMap(void).init(aa);
-    {
-        var work_known = try store.loadStream(aa, fs, root, if (work_id.len > 0) work_id else target.id);
-        if (work_id.len > 0) {
-            if (idx.streamByID(work_id)) |w| {
-                _ = w;
-            } else {
-                // Work stream may be absent; `known` then holds only the
-                // target log's ids (detached ancestry cross-reference).
+    var resolved_fork: ?store.ForkOrigin = null;
+
+    // The work stream may be absent — a packet can create it (§7). Seed
+    // `known` from its log (a `streams/<work>.jsonl` can outlive a missing
+    // record) plus the record's fork point: a bare fork's parent lives on
+    // the origin stream's log, so deposits may attach there — the same
+    // verified-ancestry rule `checkout --head` applies (#89).
+    var work_loaded: ?store.LoadedStream = null;
+    if (work_id.len > 0) {
+        work_loaded = store.loadStream(aa, fs, root, work_id) catch |err| blk: {
+            if (err == error.Refuse and
+                std.mem.eql(u8, fsys.last_refuse.code(), "stream_missing"))
+            {
+                break :blk null;
             }
+            return err;
+        };
+    }
+    defer if (work_loaded) |*wk| wk.deinit(aa);
+    {
+        if (work_loaded) |*wk| {
+            for (wk.changes) |c| try known.put(try aa.dupe(u8, c.id), {});
+            if (wk.stream.forked_from) |ff|
+                try known.put(try aa.dupe(u8, ff.change), {});
+        } else if (work_id.len > 0) {
+            const work_changes = try store.readStreamChanges(aa, fs, root, work_id);
+            for (work_changes) |c| try known.put(try aa.dupe(u8, c.id), {});
         }
-        for (work_known.changes) |c| try known.put(try aa.dupe(u8, c.id), {});
-        work_known.deinit(aa);
         var tl = try store.loadStream(aa, fs, root, target.id);
         for (tl.changes) |c| try known.put(try aa.dupe(u8, c.id), {});
         tl.deinit(aa);
     }
-    for (lines[1 + n_records .. 1 + n_records + n_changes]) |line| {
+    for (lines[1 + n_records .. 1 + n_records + n_changes], 0..) |line, ci| {
         var c = json.parseChange(aa, line) catch
             return fsys.refuse("change_malformed", "");
         if (work_id.len > 0 and !std.mem.eql(u8, c.stream, work_id)) {
@@ -2054,6 +2070,27 @@ fn cmdImport(
         }
         if (!try ed25519.verifyChange(aa, &c)) {
             return fsys.refuse("sig_invalid", "change");
+        }
+        // §7 "verified fork data": when the packet creates the work stream,
+        // the first bundled Change's parent resolves the fork — a held
+        // log's Change id becomes the new record's `forked_from`, a null
+        // parent is genesis — and anything else leaves ancestry broken.
+        if (ci == 0 and work_id.len > 0 and work_loaded == null) {
+            if (c.parent) |p| {
+                const held = try store.loadAllStreamChanges(allocator, fs, root, &idx);
+                defer store.freeChanges(allocator, held);
+                var origin: ?[]const u8 = null;
+                for (held) |hc| {
+                    if (std.mem.eql(u8, hc.id, p)) origin = hc.stream;
+                }
+                const os = origin orelse
+                    return fsys.refuse("change_malformed", "detached parent unknown");
+                resolved_fork = .{
+                    .stream = try aa.dupe(u8, os),
+                    .change = try aa.dupe(u8, p),
+                };
+                try known.put(try aa.dupe(u8, p), {});
+            }
         }
         if (c.parent) |p| {
             if (!known.contains(p)) {
@@ -2149,21 +2186,20 @@ fn cmdImport(
     }
 
     // Bundled detached Changes land on the work stream's log; create the
-    // stream record from header name + fork data when absent (§7).
+    // stream record from header name + the fork data verified above (§7).
     var changes_written: usize = 0;
     if (changes.items.len > 0) {
         if (work_id.len > 0 and idx.streamByID(work_id) == null) {
             const now_ms: i64 = try uuid_gen.nowMs();
-            const created = store.Stream{
+            var created = store.Stream{
                 .id = try allocator.dupe(u8, work_id),
                 .name = try allocator.dupe(u8, if (work_name.len > 0) work_name else work_id),
                 .head = null,
                 .created = now_ms,
-                .forked_from = null,
+                .forked_from = if (resolved_fork) |rf| try rf.clone(allocator) else null,
             };
+            defer created.deinit(allocator);
             try store.writeStreamRecord(allocator, fs, root, created);
-            var c = created;
-            c.deinit(allocator);
         }
         const wlp = try store.streamLogPath(allocator, root, work_id);
         defer allocator.free(wlp);
