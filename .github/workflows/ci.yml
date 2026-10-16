@@ -23,7 +23,7 @@ jobs:
       matrix:
         os: [ubuntu-24.04, macos-15]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -39,8 +39,29 @@ jobs:
           path: .zig-cache
           key: zig-0.17.0-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('build.zig*', 'src/**/*.zig') }}
           restore-keys: zig-0.17.0-${{ runner.os }}-${{ runner.arch }}-
+      - name: Check out pinned flintd source
+        run: |
+          pin=$(tr -d '\r\n' < tools/flint-server-pin.txt)
+          [[ "$pin" =~ ^[0-9a-f]{40}$ ]] || { echo "invalid flint-server commit pin" >&2; exit 1; }
+          mkdir -p build/flint-server
+          git -C build/flint-server init -q
+          git -C build/flint-server remote add origin https://github.com/drawmeanelephant/flint-server.git
+          git -C build/flint-server fetch --depth 1 origin "$pin"
+          git -C build/flint-server checkout --detach FETCH_HEAD
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: build/flint-server/.zig-cache
+          key: zig-0.17.0-flintd-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('tools/flint-server-pin.txt') }}
+      - name: Build flintd
+        working-directory: build/flint-server
+        # ReleaseSafe, matching the client binary the real-server suites build:
+        # a Debug flintd pays a stack-trace capture per allocation, which put
+        # the 4096-atom sync-contract clone past its 60s timeout on macOS.
+        run: zig build -Doptimize=ReleaseSafe
       - name: Documented build, lint, tests, and CLI QA
         run: python3 tools/check.py
+        env:
+          FLINTD: ${{ github.workspace }}/build/flint-server/zig-out/bin/flintd
       - name: Publish quality and timing summary
         if: always()
         run: |
