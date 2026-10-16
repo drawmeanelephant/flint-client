@@ -180,7 +180,7 @@ class SyncContractTests(unittest.TestCase):
                 self.ok(receiver, "verify", "--all")
 
     def test_short_signed_pull_must_reach_advertised_head(self):
-        """KNOWN flint-client#58, valid signatures do not prove completeness."""
+        """flint-client#58: a signed-but-short pull must refuse, not publish."""
         receiver = self.receiver("short")
         self.commit()
         self.commit()
@@ -196,16 +196,13 @@ class SyncContractTests(unittest.TestCase):
         before = snapshot(receiver)
         remote = self.proxy(shorten)
         result = self.run_client(receiver, "pull", f"--remote={remote}", "--read-timeout=2")
-        unchanged = snapshot(receiver) == before
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("refuse stream_malformed", result.stdout)
+        self.assertEqual(snapshot(receiver), before)
         self.ok(receiver, "verify", "--all")
-        self.pin_known("flint-client#58",
-                       fixed=result.returncode == 1 and unchanged,
-                       reproduced=result.returncode == 0 and not unchanged
-                       and self.head(receiver) != self.head(self.author)
-                       and "pull ok stream=main changes=1" in result.stdout)
 
     def test_aggregate_pull_bytes_must_not_publish_an_unreadable_store(self):
-        """KNOWN flint-client#59, per-page bounds are not an aggregate bound."""
+        """flint-client#59: per-page bounds are not an aggregate bound."""
         receiver = self.receiver("bounded")
         for _ in range(5):
             self.commit()
@@ -228,12 +225,10 @@ class SyncContractTests(unittest.TestCase):
         result = self.run_client(receiver, "pull", f"--remote={remote}", "--read-timeout=2")
         self.assertEqual(len(pages), 2)
         self.assertTrue(all(size < 4 * 1024 * 1024 for size in pages))
-        verification = self.run_client(receiver, "verify", "--all")
-        self.pin_known("flint-client#59",
-                       fixed=result.returncode == 1 and snapshot(receiver) == before
-                       and verification.returncode == 0,
-                       reproduced=result.returncode == 0 and len(self.log(receiver)) > 4 * 1024 * 1024
-                       and verification.returncode == 1 and "store_too_large" in verification.stdout)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("refuse store_too_large", result.stdout)
+        self.assertEqual(snapshot(receiver), before)
+        self.ok(receiver, "verify", "--all")
 
     def test_maximum_atom_commit_must_clone_from_real_server(self):
         """flint-client#60: a producer-valid Change must be receivable."""
