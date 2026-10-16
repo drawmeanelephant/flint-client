@@ -3882,12 +3882,12 @@ test "re-clone never overwrites a divergent stream (#28); fork + pull --reset + 
         try std.testing.expectEqualStrings("flint: push ok stream=main changes=1\n", res.out);
     }
 
-    // A pulls the merge Change; every store verifies green.
+    // A pulls the merge plus the deposited detached d1 (#73).
     {
         const res = try ha.runCmd(&.{ "pull", "--ws=a" });
         defer gpa.free(res.out);
         try std.testing.expectEqual(@as(u8, 0), res.rc);
-        try std.testing.expectEqualStrings("flint: pull ok stream=main changes=1\n", res.out);
+        try std.testing.expectEqualStrings("flint: pull ok stream=main changes=2\n", res.out);
     }
     for ([_]*TestHarness{ ha, hb }) |h| {
         const res = try h.runCmd(&.{ "verify", "--all" });
@@ -3901,7 +3901,7 @@ test "re-clone never overwrites a divergent stream (#28); fork + pull --reset + 
         try std.testing.expectEqual(@as(u8, 0), vrc);
     }
 
-    // Server log is [c1, c2, c3, M]; M parents the remote head and merges d1.
+    // Server log [c1,c2,c3,M,d1]: M heads the chain; d1 is detached via `deposit` (#73).
     {
         const s_log_p = try store.streamLogPath(gpa, server.store_root, main_id);
         defer gpa.free(s_log_p);
@@ -3909,7 +3909,7 @@ test "re-clone never overwrites a divergent stream (#28); fork + pull --reset + 
         defer gpa.free(s_log);
         const s_lines = try store.readJSONLLines(gpa, s_log);
         defer gpa.free(s_lines);
-        try std.testing.expectEqual(@as(usize, 4), s_lines.len);
+        try std.testing.expectEqual(@as(usize, 5), s_lines.len);
         var mc = try json.parseChange(gpa, s_lines[3]);
         defer mc.deinit(gpa);
         try std.testing.expectEqualStrings(merge_id, mc.id);

@@ -281,6 +281,46 @@ class SyncContractTests(unittest.TestCase):
         self.assertEqual(atoms(b), atoms(c))
         self.assertEqual({"main.alpha", "main.beta"}, set(atoms(b)))
 
+    def test_recovery_fork_degrades_cleanly_until_deposit_lands(self):
+        """flint-client#73: `deposit` attempts degrade to the spec_rev 2
+        re-anchor on a server that does not know the op. The fork still
+        pushes and clones; the original signed Change stays local-only
+        until flintd implements `deposit` (companion issue filed)."""
+        b = self.receiver("b")
+        self.ok(b, "keygen", "--name=b")
+        (self.source / "main.zig").write_text(
+            "pub const alpha: u32 = 2;\npub const beta: u32 = 10;\n")
+        self.ok(self.author, "add")
+        self.ok(self.author, "commit", "-m=alpha=2")
+        self.push()
+        (self.root / "b-src/main.zig").write_text(
+            "pub const alpha: u32 = 1;\npub const beta: u32 = 20;\n")
+        self.ok(b, "add")
+        self.ok(b, "commit", "-m=original-b")
+
+        def head(store):
+            return next(r["head"] for p in (store / "streams").glob("*.json")
+                        for r in [json.loads(p.read_text())] if r["name"] == "main")
+
+        original = head(b)
+        for args in [("fork", "main", "saved-b"),
+                     ("pull", "--reset", f"--remote={self.remote}"),
+                     ("merge", "saved-b"),
+                     ("push", f"--remote={self.remote}"),
+                     ("push", "--stream=saved-b", f"--remote={self.remote}")]:
+            self.ok(b, *args)
+
+        handoff = self.root / "handoff"
+        self.ok(handoff, "clone", self.remote, "--stream=saved-b", "--name=main",
+                f"--src={self.root / 'handoff-src'}")
+        self.ok(handoff, "verify", "--all")
+
+        # The preserved original is still not retrievable: today's flintd
+        # refuses `deposit` with `usage`, so push fell back to re-anchoring.
+        result = self.run_client(handoff, "verify", original)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("refuse change_missing", result.stdout + result.stderr)
+
     def test_merge_after_reset_guards_unmaterialized_source(self):
         """flint-client#72: stale src must refuse src_behind, not silently revert."""
         b = self.receiver("b")

@@ -18,7 +18,7 @@ pub const ProtoVersion = "FLINT-SYNC/1";
 /// the repo-root `SPECREV` file — `tools/tests/test_specrev.py` enforces
 /// the match. Bump rules and the downstream-pinning convention live in
 /// `docs/spec-versioning.md`.
-pub const SpecRev: u32 = 2;
+pub const SpecRev: u32 = 3;
 
 pub const AuthDomain = "FLINT-SYNC-AUTH/1\x00";
 pub const DefaultReadLimit: usize = 256;
@@ -824,6 +824,63 @@ pub const SyncClient = struct {
             else => fsys.refuse("change_malformed", ""),
         };
     }
+
+    /// Result of a `deposit` request: the stream record's head — which a
+    /// deposit never moves — and how many submitted lines were newly stored
+    /// (deduplicated lines do not count).
+    pub const DepositResult = struct {
+        head: ?[]u8,
+        stored: usize,
+
+        pub fn deinit(self: *DepositResult, allocator: Allocator) void {
+            if (self.head) |h| allocator.free(h);
+        }
+    };
+
+    /// `deposit` — FLINT-SYNC/1 spec_rev 3 (#73). Appends detached Change
+    /// lines — valid signed Changes bound to `stream_id` that do not extend
+    /// the head's first-parent chain — to the remote log so preserved work
+    /// (a recovery fork's original origin, a `merged` link's target) becomes
+    /// retrievable. The record head never moves and raw bytes travel
+    /// verbatim. Servers that predate the op refuse `usage`; callers fall
+    /// back to the spec_rev 2 re-anchor behavior.
+    pub fn deposit(
+        self: *SyncClient,
+        stream_id: []const u8,
+        raw_changes: []const []const u8,
+    ) !DepositResult {
+        const seq = self.nextSeq();
+        var req: std.ArrayList(u8) = .empty;
+        defer req.deinit(self.allocator);
+        try req.print(self.allocator, "{{\"op\":\"deposit\",\"seq\":{d},\"stream\":", .{seq});
+        try json.appendGoJSONString(&req, self.allocator, stream_id);
+        try req.appendSlice(self.allocator, ",\"changes\":[");
+        for (raw_changes, 0..) |line, i| {
+            if (i > 0) try req.append(self.allocator, ',');
+            const clean = std.mem.trimEnd(u8, line, "\r\n");
+            try json.appendGoJSONString(&req, self.allocator, clean);
+        }
+        try req.appendSlice(self.allocator, "]}");
+
+        var parsed = try self.sendAndParse(req.items);
+        defer parsed.deinit();
+        const obj = try self.checkResponseOk(parsed.value, seq);
+
+        var head: ?[]u8 = null;
+        errdefer if (head) |h| self.allocator.free(h);
+        if (obj.get("head")) |hv| {
+            head = switch (hv) {
+                .null => null,
+                .string => |s| try self.allocator.dupe(u8, s),
+                else => return fsys.refuse("change_malformed", ""),
+            };
+        }
+        const stored: usize = if (obj.get("stored")) |sv| switch (sv) {
+            .integer => |i| if (i >= 0) @intCast(i) else 0,
+            else => 0,
+        } else 0;
+        return .{ .head = head, .stored = stored };
+    }
 };
 
 fn parseStreamValue(allocator: Allocator, val: std.json.Value) !store.Stream {
@@ -880,15 +937,39 @@ fn freeHeadsMap(allocator: Allocator, map: *std.StringHashMap(?[]u8)) void {
     map.deinit();
 }
 
+/// A verified `read` of a remote stream log: the raw lines plus the deepest
+/// Change id reached on the first-parent chain continuing from
+/// `expected_first_parent` (`chain_tip` — owned). Detached lines never
+/// advance the tip; callers compare it against the advertised record head.
+pub const FetchResult = struct {
+    lines: [][]u8,
+    chain_tip: ?[]u8,
+
+    pub fn deinit(self: FetchResult, allocator: Allocator) void {
+        for (self.lines) |l| allocator.free(l);
+        allocator.free(self.lines);
+        if (self.chain_tip) |t| allocator.free(t);
+    }
+};
+
 /// Fetches all raw Change lines for `st` from `client` and verifies every Change
-/// (`parseChange`, `stream == st.id`, `validateCommitMessage`, parent chain, `verifyChange`).
+/// (`parseChange`, `stream == st.id`, `validateCommitMessage`, `verifyChange`).
+///
+/// A remote log may interleave **detached** lines — preserved Changes off the
+/// head's first-parent chain, published via `deposit` (spec_rev 3, #73) — with
+/// the head chain. Each line either continues the chain (`parent` equals the
+/// current chain tip) or is detached; a detached line's `parent` must be null
+/// or already-seen content (`known_ids`, `expected_first_parent`, or an
+/// earlier fetched id) — ancestry completeness is the wire contract. The
+/// caller owns both `FetchResult` fields.
 fn fetchAndVerifyStreamChanges(
     allocator: Allocator,
     client: *SyncClient,
     st: store.Stream,
     after: ?[]const u8,
     expected_first_parent: ?[]const u8,
-) ![][]u8 {
+    known_ids: ?*const std.StringHashMap(void),
+) !FetchResult {
     var all_lines: std.ArrayList([]u8) = .empty;
     errdefer {
         for (all_lines.items) |l| allocator.free(l);
@@ -917,8 +998,21 @@ fn fetchAndVerifyStreamChanges(
     }
 
     // Verify every Change before returning so the caller writes nothing on error.
-    var prev_id: ?[]u8 = if (expected_first_parent) |p| try allocator.dupe(u8, p) else null;
-    defer if (prev_id) |p| allocator.free(p);
+    var seen = std.StringHashMap(void).init(allocator);
+    defer seen.deinit();
+    var seen_owned: std.ArrayList([]u8) = .empty;
+    defer {
+        for (seen_owned.items) |k| allocator.free(k);
+        seen_owned.deinit(allocator);
+    }
+    if (expected_first_parent) |p| try seen.put(p, {});
+    if (known_ids) |ids| {
+        var it = ids.keyIterator();
+        while (it.next()) |k| try seen.put(k.*, {});
+    }
+
+    var chain_tip: ?[]u8 = if (expected_first_parent) |p| try allocator.dupe(u8, p) else null;
+    errdefer if (chain_tip) |t| allocator.free(t);
 
     for (all_lines.items) |raw_line| {
         if (raw_line.len + 1 > MaxChangeBytes) {
@@ -932,14 +1026,19 @@ fn fetchAndVerifyStreamChanges(
         }
         try sign.validateCommitMessage(c.message);
 
-        if (prev_id) |pid| {
-            const cp = c.parent orelse return fsys.refuse("change_malformed", "parent mismatch");
-            if (!std.mem.eql(u8, cp, pid)) {
-                return fsys.refuse("change_malformed", "parent mismatch");
-            }
-        } else {
-            if (c.parent != null) {
-                return fsys.refuse("change_malformed", "non-null root parent");
+        const on_chain = if (chain_tip) |tip|
+            c.parent != null and std.mem.eql(u8, c.parent.?, tip)
+        else
+            c.parent == null;
+        if (on_chain) {
+            if (chain_tip) |t| allocator.free(t);
+            chain_tip = try allocator.dupe(u8, c.id);
+        } else if (c.parent) |p| {
+            // Detached line: preserved off-chain work. Its parent must be
+            // content this reader already holds or just fetched — a peer
+            // shipping orphans violates ancestry completeness.
+            if (!seen.contains(p)) {
+                return fsys.refuse("change_malformed", "detached parent unknown");
             }
         }
 
@@ -948,11 +1047,16 @@ fn fetchAndVerifyStreamChanges(
             return fsys.refuse("sig_invalid", "");
         }
 
-        if (prev_id) |p| allocator.free(p);
-        prev_id = try allocator.dupe(u8, c.id);
+        // `c` is freed at iteration end — dupe the id for the seen set.
+        const key = try allocator.dupe(u8, c.id);
+        try seen_owned.append(allocator, key);
+        try seen.put(key, {});
     }
 
-    return all_lines.toOwnedSlice(allocator);
+    return .{
+        .lines = try all_lines.toOwnedSlice(allocator),
+        .chain_tip = chain_tip,
+    };
 }
 
 /// Implements `flint clone <remote> --stream=<name|id> [--name=<ws>] --src=<dir> [--auth-key=<file>]`.
@@ -1098,9 +1202,8 @@ pub fn cmdClone(
     const StreamPayload = struct {
         record: store.Stream,
         raw_lines: [][]u8,
-        /// When `existed` is true, the local log is a verified prefix of
-        /// `raw_lines` and only `raw_lines[append_from..]` is appended.
-        append_from: usize = 0,
+        /// When `existed` is true, the local log fast-forwards: only the
+        /// remote lines whose ids the local log lacks are appended.
         existed: bool = false,
     };
     var payloads: std.ArrayList(StreamPayload) = .empty;
@@ -1117,34 +1220,25 @@ pub fn cmdClone(
 
     for (chain.items) |st| {
         const first_parent: ?[]const u8 = if (st.forked_from) |ff| ff.change else null;
-        const lines = try fetchAndVerifyStreamChanges(allocator, &client, st, null, first_parent);
+        const fetch = try fetchAndVerifyStreamChanges(allocator, &client, st, null, first_parent, null);
+        defer if (fetch.chain_tip) |t| allocator.free(t);
+        const lines = fetch.lines;
         errdefer {
             for (lines) |l| allocator.free(l);
             allocator.free(lines);
         }
 
-        // Verify final head matches stream record head.
-        if (lines.len > 0) {
-            var last_c = try json.parseChange(allocator, lines[lines.len - 1]);
-            defer last_c.deinit(allocator);
-            const expected_h = st.head orelse return fsys.refuse("stream_malformed", "null head with changes");
-            if (!std.mem.eql(u8, last_c.id, expected_h)) {
-                return fsys.refuse("stream_malformed", "head mismatch");
-            }
-        } else {
-            if (st.forked_from) |ff| {
-                const expected_h = st.head orelse return fsys.refuse("stream_malformed", "fork null head");
-                if (!std.mem.eql(u8, expected_h, ff.change)) {
-                    return fsys.refuse("stream_malformed", "fork head mismatch");
-                }
-            } else if (st.head != null) {
-                return fsys.refuse("stream_malformed", "non-null head on empty stream");
-            }
+        // The signed first-parent chain must reach the record's advertised
+        // head — detached lines never advance the chain tip (#58, #73).
+        if (!store.optStrEql(fetch.chain_tip, st.head)) {
+            return fsys.refuse("stream_malformed", "head mismatch");
         }
 
         // Spec §4: a local stream is never silently overwritten. Re-clone is
-        // allowed only as a fast-forward: the existing local log must be a
-        // verified prefix of the remote log, and the record must agree.
+        // allowed only as a fast-forward: the remote log filtered to local
+        // Change ids must equal the local log line-for-line, and the record
+        // must agree. Comparing id order rather than byte position lets a
+        // remote log carrying detached lines (#73) still fast-forward.
         if (idx.streamByID(st.id)) |local_rec| {
             if (!std.mem.eql(u8, local_rec.name, st.name) or
                 !forkOriginEql(local_rec.forked_from, st.forked_from))
@@ -1153,30 +1247,47 @@ pub fn cmdClone(
             }
             const local_lines = try readStreamRawLines(allocator, fs, root, st.id);
             defer freeRawLines(allocator, local_lines);
+            const local_changes = try store.readStreamChanges(allocator, fs, root, st.id);
+            defer store.freeChanges(allocator, local_changes);
 
-            var is_prefix = local_lines.len <= lines.len;
-            if (is_prefix) {
-                for (local_lines, 0..) |ll, li| {
-                    if (!std.mem.eql(u8, ll, lines[li])) {
-                        is_prefix = false;
-                        break;
-                    }
+            var local_ids = std.StringHashMap(void).init(allocator);
+            defer local_ids.deinit();
+            // `local_changes` is parallel to `local_lines`; its ids outlive
+            // this map.
+            for (local_changes) |*lc| try local_ids.put(lc.id, {});
+
+            var new_count: usize = 0;
+            var local_pos: usize = 0;
+            var is_fast_forward = true;
+            for (lines) |rl| {
+                var rc = try json.parseChange(allocator, rl);
+                defer rc.deinit(allocator);
+                if (!local_ids.contains(rc.id)) {
+                    new_count += 1;
+                    continue;
                 }
+                if (local_pos >= local_changes.len) {
+                    is_fast_forward = false;
+                    break;
+                }
+                if (!std.mem.eql(u8, local_changes[local_pos].id, rc.id)) {
+                    is_fast_forward = false;
+                    break;
+                }
+                if (!std.mem.eql(u8, local_lines[local_pos], rl)) {
+                    return fsys.refuse("stream_malformed", "id conflict");
+                }
+                local_pos += 1;
             }
-            if (!is_prefix) {
-                const local_changes = try store.readStreamChanges(allocator, fs, root, st.id);
-                defer store.freeChanges(allocator, local_changes);
+            if (local_pos < local_lines.len) is_fast_forward = false;
+
+            if (!is_fast_forward) {
                 var remote_in_local = false;
                 if (st.head) |rh| {
                     if (local_rec.forked_from) |ff| {
                         if (std.mem.eql(u8, rh, ff.change)) remote_in_local = true;
                     }
-                    for (local_changes) |c| {
-                        if (std.mem.eql(u8, c.id, rh)) {
-                            remote_in_local = true;
-                            break;
-                        }
-                    }
+                    if (local_ids.contains(rh)) remote_in_local = true;
                 }
                 if (remote_in_local) {
                     // Local is strictly ahead: re-clone would roll the head back.
@@ -1184,11 +1295,10 @@ pub fn cmdClone(
                 }
                 return fsys.refuse("fork_needed", "");
             }
-            total_new_changes += lines.len - local_lines.len;
+            total_new_changes += new_count;
             try payloads.append(allocator, .{
                 .record = st,
                 .raw_lines = lines,
-                .append_from = local_lines.len,
                 .existed = true,
             });
         } else {
@@ -1226,15 +1336,24 @@ pub fn cmdClone(
         const log_path = try store.streamLogPath(allocator, root, p.record.id);
         defer allocator.free(log_path);
         if (p.existed) {
-            // Fast-forward re-clone: append only the missing suffix so the
-            // local Change log stays append-only and never rewritten.
-            if (p.raw_lines.len > p.append_from) {
-                var log_buf: std.ArrayList(u8) = .empty;
-                defer log_buf.deinit(allocator);
-                for (p.raw_lines[p.append_from..]) |line| {
-                    try log_buf.appendSlice(allocator, line);
-                    try log_buf.append(allocator, '\n');
-                }
+            // Fast-forward re-clone: append only the remote lines the local
+            // log lacks so the Change log stays append-only and never
+            // rewritten — deduped by id, appended in remote order (#73).
+            const local_changes = try store.readStreamChanges(allocator, fs, root, p.record.id);
+            defer store.freeChanges(allocator, local_changes);
+            var local_ids = std.StringHashMap(void).init(allocator);
+            defer local_ids.deinit();
+            for (local_changes) |*lc| try local_ids.put(lc.id, {});
+            var log_buf: std.ArrayList(u8) = .empty;
+            defer log_buf.deinit(allocator);
+            for (p.raw_lines) |line| {
+                var rc = try json.parseChange(allocator, line);
+                defer rc.deinit(allocator);
+                if (local_ids.contains(rc.id)) continue;
+                try log_buf.appendSlice(allocator, line);
+                try log_buf.append(allocator, '\n');
+            }
+            if (log_buf.items.len > 0) {
                 try checkLogAppendBound(allocator, fs, log_path, log_buf.items.len);
                 try fs.appendSync(allocator, log_path, log_buf.items);
             }
@@ -1379,6 +1498,140 @@ fn reanchorForkRecord(
     st.forked_from = new_ff;
 }
 
+/// Builds the id set of `loaded`'s first-parent head chain. Every other
+/// Change in the log is detached — an unreachable sibling line (#73).
+fn headChainIdSet(
+    allocator: Allocator,
+    loaded: *const store.LoadedStream,
+    by_id: *std.StringHashMap(usize),
+) !std.StringHashMap(void) {
+    for (loaded.changes, 0..) |c, ci| try by_id.put(c.id, ci);
+    var set = std.StringHashMap(void).init(allocator);
+    var cur: ?[]const u8 = loaded.stream.head;
+    while (cur) |cid| {
+        const ci = by_id.get(cid) orelse break;
+        try set.put(cid, {});
+        cur = loaded.changes[ci].parent;
+    }
+    return set;
+}
+
+/// Collects `tip_id`'s detached first-parent ancestry in `loaded` — ancestors
+/// that do not lie on the head chain — as log indices ordered
+/// parent-before-child for a `deposit` batch (#73). The walk stops at the
+/// head chain, a null parent, or an id absent from the local log; a tip
+/// missing locally or already on the head chain yields an empty result.
+fn detachedAncestryIndices(
+    allocator: Allocator,
+    loaded: *const store.LoadedStream,
+    head_chain: *const std.StringHashMap(void),
+    by_id: *std.StringHashMap(usize),
+    tip_id: []const u8,
+) ![]usize {
+    var rev: std.ArrayList(usize) = .empty;
+    defer rev.deinit(allocator);
+    var cur: ?[]const u8 = tip_id;
+    while (cur) |cid| {
+        if (head_chain.contains(cid)) break;
+        const ci = by_id.get(cid) orelse break;
+        try rev.append(allocator, ci);
+        cur = loaded.changes[ci].parent;
+    }
+    const out = try allocator.alloc(usize, rev.items.len);
+    for (rev.items, 0..) |ci, i| out[rev.items.len - 1 - i] = ci;
+    return out;
+}
+
+/// `deposit`s `tip_id`'s detached ancestry on `stream_id`'s remote log,
+/// batching at `MaxBatchChanges`; returns the number of lines submitted.
+/// Wire refusals propagate — callers choose the fallback policy (#73).
+fn depositDetachedAncestry(
+    allocator: Allocator,
+    fs: FS,
+    root: []const u8,
+    client: *SyncClient,
+    stream_id: []const u8,
+    tip_id: []const u8,
+) !usize {
+    var origin = try store.loadStream(allocator, fs, root, stream_id);
+    defer origin.deinit(allocator);
+    const raw_lines = try readStreamRawLines(allocator, fs, root, stream_id);
+    defer freeRawLines(allocator, raw_lines);
+
+    var by_id = std.StringHashMap(usize).init(allocator);
+    defer by_id.deinit();
+    var head_chain = try headChainIdSet(allocator, &origin, &by_id);
+    defer head_chain.deinit();
+
+    const indices = try detachedAncestryIndices(allocator, &origin, &head_chain, &by_id, tip_id);
+    defer allocator.free(indices);
+    if (indices.len == 0) return 0;
+
+    var lines = try allocator.alloc([]const u8, indices.len);
+    defer allocator.free(lines);
+    for (indices, 0..) |ci, i| lines[i] = raw_lines[ci];
+
+    var sent: usize = 0;
+    while (sent < lines.len) {
+        const end = @min(sent + MaxBatchChanges, lines.len);
+        var res = try client.deposit(stream_id, lines[sent..end]);
+        res.deinit(allocator);
+        sent = end;
+    }
+    return sent;
+}
+
+/// Publishes work the stream's own merge Changes incorporated: for each
+/// `merged` link naming a Change present locally but unreachable from the
+/// head, deposits its detached ancestry onto the same stream so the signed
+/// link resolves remotely (#73). A `usage` refusal means the server
+/// predates `deposit` — remaining tips are skipped and the push finishes
+/// under spec_rev 2 behavior; other refusals propagate.
+fn publishIncorporatedWork(
+    allocator: Allocator,
+    client: *SyncClient,
+    st_id: []const u8,
+    loaded: *const store.LoadedStream,
+    raw_lines: [][]u8,
+) !void {
+    var by_id = std.StringHashMap(usize).init(allocator);
+    defer by_id.deinit();
+    var head_chain = try headChainIdSet(allocator, loaded, &by_id);
+    defer head_chain.deinit();
+
+    var submitted = std.StringHashMap(void).init(allocator);
+    defer submitted.deinit();
+    var pending: std.ArrayList([]const u8) = .empty;
+    defer pending.deinit(allocator);
+
+    for (loaded.changes) |c| {
+        const m = c.merged orelse continue;
+        if (head_chain.contains(m) or !by_id.contains(m)) continue;
+        const indices = try detachedAncestryIndices(allocator, loaded, &head_chain, &by_id, m);
+        defer allocator.free(indices);
+        for (indices) |ci| {
+            const cid = loaded.changes[ci].id;
+            if (submitted.contains(cid)) continue;
+            try submitted.put(cid, {});
+            try pending.append(allocator, raw_lines[ci]);
+        }
+    }
+
+    var sent: usize = 0;
+    while (sent < pending.items.len) {
+        const end = @min(sent + MaxBatchChanges, pending.items.len);
+        var res = client.deposit(st_id, pending.items[sent..end]) catch |err| {
+            // A server that predates `deposit` refuses `usage`: incorporated
+            // work simply stays local, matching the v1 contract.
+            if (err == error.Refuse and
+                std.mem.eql(u8, fsys.last_refuse.code(), "usage")) return;
+            return err;
+        };
+        res.deinit(allocator);
+        sent = end;
+    }
+}
+
 fn pushSingleStream(
     allocator: Allocator,
     fs: FS,
@@ -1416,28 +1669,50 @@ fn pushSingleStream(
                 return cerr;
             }
             const ff = loaded.stream.forked_from orelse return cerr;
-            if (loaded.changes.len != 0 or
-                !store.optStrEql(loaded.stream.head, ff.change)) return cerr;
-            // The fork origin exists only as an unreachable sibling line
-            // (e.g. preserved by `pull --reset`); it can never join a remote
-            // log — `stream` sits inside the signed preimage and `append`
-            // only takes first-parent extensions of the remote head. When the
-            // origin stream's first-parent chain holds the merge Change that
-            // incorporated it, re-anchor the fork record to that merge so the
-            // preserved line stays publishable through the merge's signed
-            // `merged` link (#65).
-            const mc = (try findIncorporatingMerge(allocator, fs, root, ff.stream, ff.change)) orelse return cerr;
-            remote_head_owned = mc;
-            init_head = mc;
-            try reanchorForkRecord(allocator, fs, root, &loaded.stream, mc);
-            init_rec = store.Stream{
-                .id = loaded.stream.id,
-                .name = loaded.stream.name,
-                .head = init_head,
-                .forked_from = loaded.stream.forked_from,
-                .created = loaded.stream.created,
+            // spec_rev 3 (#73): the missing origin is a detached local line —
+            // deposit it with its unreachable ancestry onto its own stream's
+            // remote log (signed `stream` binding preserved), then `create`
+            // keeps the original `forked_from`. This also publishes a fork
+            // that carries its own Changes: the record lands, then the
+            // ordinary `append` suffix covers them. Any refusal falls back to
+            // the spec_rev 2 path below.
+            const deposited = depositDetachedAncestry(
+                allocator,
+                fs,
+                root,
+                client,
+                ff.stream,
+                ff.change,
+            ) catch |derr| blk: {
+                if (derr == error.Refuse) break :blk @as(usize, 0);
+                return derr;
             };
-            try client.create(init_rec);
+            if (deposited > 0) {
+                try client.create(init_rec);
+            } else {
+                if (loaded.changes.len != 0 or
+                    !store.optStrEql(loaded.stream.head, ff.change)) return cerr;
+                // The fork origin exists only as an unreachable sibling line
+                // (e.g. preserved by `pull --reset`); it can never join a remote
+                // log — `stream` sits inside the signed preimage and `append`
+                // only takes first-parent extensions of the remote head. When the
+                // origin stream's first-parent chain holds the merge Change that
+                // incorporated it, re-anchor the fork record to that merge so the
+                // preserved line stays publishable through the merge's signed
+                // `merged` link (#65).
+                const mc = (try findIncorporatingMerge(allocator, fs, root, ff.stream, ff.change)) orelse return cerr;
+                remote_head_owned = mc;
+                init_head = mc;
+                try reanchorForkRecord(allocator, fs, root, &loaded.stream, mc);
+                init_rec = store.Stream{
+                    .id = loaded.stream.id,
+                    .name = loaded.stream.name,
+                    .head = init_head,
+                    .forked_from = loaded.stream.forked_from,
+                    .created = loaded.stream.created,
+                };
+                try client.create(init_rec);
+            }
         };
         was_created = true;
         remote_head = init_head;
@@ -1458,6 +1733,10 @@ fn pushSingleStream(
         false;
 
     if (heads_equal) {
+        // Heads agree, but a previous push may have been interrupted before
+        // its incorporated-work deposit landed — deposits are idempotent, so
+        // reconcile here as well (#73).
+        try publishIncorporatedWork(allocator, client, st_id, &loaded, raw_lines);
         return .{ .sent_changes = 0, .was_created = was_created };
     }
 
@@ -1552,6 +1831,11 @@ fn pushSingleStream(
         sent += batch.len;
         batch_start = batch_end;
     }
+
+    // The head chain is published; now publish the incorporated work the new
+    // Changes' `merged` links name — detached ancestry onto this same stream
+    // so the links resolve for fresh clones (#73).
+    try publishIncorporatedWork(allocator, client, st_id, &loaded, raw_lines);
 
     if (server_heads.getPtr(st_id)) |val_ptr| {
         if (val_ptr.*) |old_v| allocator.free(old_v);
@@ -1769,10 +2053,21 @@ pub fn cmdPull(
     };
 
     const local_head = loaded.stream.head;
-    if (local_head) |lh| {
-        if (std.mem.eql(u8, lh, remote_head)) {
-            try stdout.writeAll("flint: pull up to date\n");
-            return;
+    const heads_match = store.optStrEql(local_head, remote_head);
+    if (!heads_match) {
+        // `remote_head` already in local stream changes (or equal to
+        // `forked_from.change`) means local is a superset of remote.
+        if (loaded.stream.forked_from) |ff| {
+            if (std.mem.eql(u8, remote_head, ff.change)) {
+                try stdout.writeAll("flint: pull up to date\n");
+                return;
+            }
+        }
+        for (loaded.changes) |c| {
+            if (std.mem.eql(u8, c.id, remote_head)) {
+                try stdout.writeAll("flint: pull up to date\n");
+                return;
+            }
         }
     }
 
@@ -1791,21 +2086,6 @@ pub fn cmdPull(
         );
     }
 
-    // If `remote_head` is already in local stream changes (or equals `forked_from.change`),
-    // local is already a superset of remote.
-    if (loaded.stream.forked_from) |ff| {
-        if (std.mem.eql(u8, remote_head, ff.change)) {
-            try stdout.writeAll("flint: pull up to date\n");
-            return;
-        }
-    }
-    for (loaded.changes) |c| {
-        if (std.mem.eql(u8, c.id, remote_head)) {
-            try stdout.writeAll("flint: pull up to date\n");
-            return;
-        }
-    }
-
     // Determine `after` parameter for `read`.
     // When a forked stream has no changes of its own yet, its `.jsonl` on the server is empty
     // or starts after `forked_from.change`, so `after` is null.
@@ -1817,52 +2097,75 @@ pub fn cmdPull(
     else
         null;
 
-    const fetched_lines = fetchAndVerifyStreamChanges(
+    // Even when the record heads match, the log suffix may carry detached
+    // lines published since the last sync (#73) — always read it.
+    var known_ids = std.StringHashMap(void).init(allocator);
+    defer known_ids.deinit();
+    for (loaded.changes) |c| try known_ids.put(c.id, {});
+    if (loaded.stream.forked_from) |ff| try known_ids.put(ff.change, {});
+
+    const fetch = fetchAndVerifyStreamChanges(
         allocator,
         &client,
         loaded.stream,
         after_arg,
         expected_first_parent,
+        &known_ids,
     ) catch |err| {
         if (err == error.Refuse and std.mem.eql(u8, fsys.last_refuse.code(), "change_missing")) {
             return fsys.refuse("fork_needed", "");
         }
         return err;
     };
-    defer {
-        for (fetched_lines) |l| allocator.free(l);
-        allocator.free(fetched_lines);
+    defer fetch.deinit(allocator);
+
+    // The signed first-parent chain must reach the remote record's
+    // advertised head; a proper signed prefix is still an incomplete pull
+    // (#58) and detached lines never advance the tip (#73).
+    if (!store.optStrEql(fetch.chain_tip, remote_head)) {
+        return fsys.refuse(
+            if (fetch.lines.len == 0) "fork_needed" else "stream_malformed",
+            if (fetch.lines.len == 0) "" else "head mismatch",
+        );
     }
 
-    if (fetched_lines.len == 0) {
-        if (local_head != null) {
-            return fsys.refuse("fork_needed", "");
+    // Dedupe by id: a remote suffix may carry detached lines the local log
+    // already holds. Identical bytes skip; the same id under different
+    // bytes is a conflict the signature model cannot reconcile.
+    const local_raw = try readStreamRawLines(allocator, fs, root, loaded.stream.id);
+    defer freeRawLines(allocator, local_raw);
+    var local_by_id = std.StringHashMap([]const u8).init(allocator);
+    defer local_by_id.deinit();
+    // `loaded.changes` is parallel to `local_raw`; its ids outlive this map.
+    for (loaded.changes, 0..) |*lc, li| try local_by_id.put(lc.id, local_raw[li]);
+
+    var fresh: usize = 0;
+    var append_buf: std.ArrayList(u8) = .empty;
+    defer append_buf.deinit(allocator);
+    for (fetch.lines) |line| {
+        var rc = try json.parseChange(allocator, line);
+        defer rc.deinit(allocator);
+        if (local_by_id.get(rc.id)) |existing| {
+            if (!std.mem.eql(u8, existing, line)) {
+                return fsys.refuse("stream_malformed", "id conflict");
+            }
+            continue;
         }
+        try append_buf.appendSlice(allocator, line);
+        try append_buf.append(allocator, '\n');
+        fresh += 1;
+    }
+
+    if (fresh == 0) {
         try stdout.writeAll("flint: pull up to date\n");
         return;
     }
 
-    if (idx.change_count + fetched_lines.len > store.MaxChanges) {
+    if (idx.change_count + fresh > store.MaxChanges) {
         return fsys.refuse("store_too_large", "changes");
     }
 
-    var last_change = try json.parseChange(allocator, fetched_lines[fetched_lines.len - 1]);
-    defer last_change.deinit(allocator);
-
-    // The signed chain must reach the remote record's advertised head; a
-    // proper signed prefix is still an incomplete pull (#58).
-    if (!std.mem.eql(u8, last_change.id, remote_head)) {
-        return fsys.refuse("stream_malformed", "head mismatch");
-    }
-
     // Append raw lines to `streams/<id>.jsonl` first, then rewrite `streams/<id>.json`.
-    var append_buf: std.ArrayList(u8) = .empty;
-    defer append_buf.deinit(allocator);
-    for (fetched_lines) |line| {
-        try append_buf.appendSlice(allocator, line);
-        try append_buf.append(allocator, '\n');
-    }
-
     const log_path = try store.streamLogPath(allocator, root, loaded.stream.id);
     defer allocator.free(log_path);
     try checkLogAppendBound(allocator, fs, log_path, append_buf.items.len);
@@ -1871,7 +2174,7 @@ pub fn cmdPull(
     const updated_stream = store.Stream{
         .id = loaded.stream.id,
         .name = loaded.stream.name,
-        .head = last_change.id,
+        .head = remote_head,
         .forked_from = loaded.stream.forked_from,
         .created = loaded.stream.created,
     };
@@ -1885,7 +2188,7 @@ pub fn cmdPull(
         try store.writeWorkspaceRemote(allocator, fs, root, wn, rc);
     }
 
-    try stdout.print("flint: pull ok stream={s} changes={d}\n", .{ loaded.stream.name, fetched_lines.len });
+    try stdout.print("flint: pull ok stream={s} changes={d}\n", .{ loaded.stream.name, fresh });
 }
 
 /// Implements `flint pull --reset` — the divergence-recovery path for the spec §4
@@ -1929,28 +2232,18 @@ fn pullResetToRemote(
     }
 
     // Fetch and verify the whole remote log; the first Change's parent is the
-    // fork point for a forked stream, else null.
+    // fork point for a forked stream, else null. Detached lines verify but
+    // never advance the chain tip (#73).
     const first_parent: ?[]const u8 = if (remote_rec.forked_from) |ff| ff.change else null;
-    const remote_lines = try fetchAndVerifyStreamChanges(allocator, client, remote_rec, null, first_parent);
-    defer {
-        for (remote_lines) |l| allocator.free(l);
-        allocator.free(remote_lines);
-    }
+    const fetch = try fetchAndVerifyStreamChanges(allocator, client, remote_rec, null, first_parent, null);
+    defer fetch.deinit(allocator);
+    const remote_lines = fetch.lines;
 
-    // The remote record head must equal the last log line (or `forked_from.change`
-    // on a forked stream whose own log is still empty).
-    if (remote_lines.len > 0) {
-        var last_c = try json.parseChange(allocator, remote_lines[remote_lines.len - 1]);
-        defer last_c.deinit(allocator);
-        if (!std.mem.eql(u8, last_c.id, remote_head)) {
-            return fsys.refuse("stream_malformed", "head mismatch");
-        }
-    } else if (remote_rec.forked_from) |ff| {
-        if (!std.mem.eql(u8, remote_head, ff.change)) {
-            return fsys.refuse("stream_malformed", "fork head mismatch");
-        }
-    } else {
-        return fsys.refuse("stream_malformed", "non-null head on empty stream");
+    // The remote record head must be reached through the first-parent chain
+    // (or equal `forked_from.change` on a forked stream whose own log is
+    // still empty — the chain tip starts there).
+    if (!store.optStrEql(fetch.chain_tip, remote_head)) {
+        return fsys.refuse("stream_malformed", "head mismatch");
     }
 
     var remote_changes: std.ArrayList(store.Change) = .empty;
@@ -1972,12 +2265,27 @@ fn pullResetToRemote(
     for (loaded.changes) |c| try local_ids.put(c.id, {});
     if (loaded.stream.forked_from) |ff| try local_ids.put(ff.change, {});
 
+    const local_raw = try readStreamRawLines(allocator, fs, root, loaded.stream.id);
+    defer freeRawLines(allocator, local_raw);
+    var local_by_id = std.StringHashMap([]const u8).init(allocator);
+    defer local_by_id.deinit();
+    // `loaded.changes` is parallel to `local_raw`; its ids outlive this map.
+    for (loaded.changes, 0..) |*lc, li| try local_by_id.put(lc.id, local_raw[li]);
+
     var missing: std.ArrayList([]const u8) = .empty;
     defer missing.deinit(allocator);
     for (remote_changes.items, 0..) |c, ri| {
-        if (!local_ids.contains(c.id)) {
-            try missing.append(allocator, remote_lines[ri]);
+        if (local_ids.contains(c.id)) {
+            // A shared id must carry identical bytes — the same id under
+            // different content is a conflict, not a duplicate.
+            if (local_by_id.get(c.id)) |existing| {
+                if (!std.mem.eql(u8, existing, remote_lines[ri])) {
+                    return fsys.refuse("stream_malformed", "id conflict");
+                }
+            }
+            continue;
         }
+        try missing.append(allocator, remote_lines[ri]);
     }
 
     // Orphan guard: rolling the head to `remote_head` unroots the local head.
@@ -2232,6 +2540,9 @@ pub const InProcServer = struct {
             }
             if (std.mem.eql(u8, op, "append")) {
                 return self.handleAppend(allocator, seq, obj);
+            }
+            if (std.mem.eql(u8, op, "deposit")) {
+                return self.handleDeposit(allocator, seq, obj);
             }
 
             return marshalRefuse(allocator, seq, "usage", "unknown op");
@@ -2628,6 +2939,170 @@ pub const InProcServer = struct {
             try out.append(allocator, '}');
             return out.toOwnedSlice(allocator);
         }
+
+        /// `deposit` — spec_rev 3 (#73): appends detached Change lines to the
+        /// stream's log without moving the record head. Same per-Change
+        /// validation as `append`, plus the detached rules: no line may
+        /// extend the head, every line's parent must be null or known
+        /// content (log ids, `forked_from.change`, or an earlier batch id),
+        /// and an already-known id deduplicates unless its bytes differ.
+        /// All-or-nothing; the stream record is never rewritten.
+        fn handleDeposit(self: *Session, allocator: Allocator, seq: u64, obj: std.json.ObjectMap) ![]u8 {
+            const s_arg = if (obj.get("stream")) |sv| switch (sv) {
+                .string => |s| s,
+                else => return marshalRefuse(allocator, seq, "stream_missing", ""),
+            } else return marshalRefuse(allocator, seq, "stream_missing", "");
+
+            const changes_val = obj.get("changes") orelse return marshalRefuse(allocator, seq, "change_malformed", "");
+            const changes_arr = switch (changes_val) {
+                .array => |a| a,
+                else => return marshalRefuse(allocator, seq, "change_malformed", ""),
+            };
+            if (changes_arr.items.len == 0 or changes_arr.items.len > MaxBatchChanges) {
+                return marshalRefuse(allocator, seq, "change_malformed", "batch size");
+            }
+
+            var idx = store.loadStoreIndex(allocator, self.server.fs, self.server.store_root) catch |err| {
+                return marshalErrRefuse(allocator, seq, err);
+            };
+            defer idx.deinit();
+
+            const st_entry = resolveServerStream(&idx, s_arg) orelse {
+                return marshalRefuse(allocator, seq, "stream_missing", s_arg);
+            };
+
+            var loaded = store.loadStream(allocator, self.server.fs, self.server.store_root, st_entry.id) catch |err| {
+                return marshalErrRefuse(allocator, seq, err);
+            };
+            defer loaded.deinit(allocator);
+
+            const raw_lines = readStreamRawLines(allocator, self.server.fs, self.server.store_root, st_entry.id) catch |err| {
+                return marshalErrRefuse(allocator, seq, err);
+            };
+            defer freeRawLines(allocator, raw_lines);
+
+            var by_id = std.StringHashMap([]const u8).init(allocator);
+            defer by_id.deinit();
+            var known = std.StringHashMap(void).init(allocator);
+            defer known.deinit();
+            // `loaded.changes` is parallel to `raw_lines`; its ids outlive
+            // these maps, so they can key them directly.
+            for (loaded.changes, 0..) |*lc, li| {
+                by_id.put(lc.id, raw_lines[li]) catch |err| return marshalErrRefuse(allocator, seq, err);
+                known.put(lc.id, {}) catch |err| return marshalErrRefuse(allocator, seq, err);
+            }
+            if (loaded.stream.forked_from) |ff| {
+                known.put(ff.change, {}) catch |err| return marshalErrRefuse(allocator, seq, err);
+            }
+            const cur_head = loaded.stream.head;
+
+            var log_buf: std.ArrayList(u8) = .empty;
+            defer log_buf.deinit(allocator);
+            var stored: usize = 0;
+            // Ids of batch-accepted Changes are duped so the maps never hold
+            // memory owned by a per-item `Change` freed each iteration.
+            var batch_keys: std.ArrayList([]u8) = .empty;
+            defer {
+                for (batch_keys.items) |k| allocator.free(k);
+                batch_keys.deinit(allocator);
+            }
+
+            for (changes_arr.items) |item| {
+                const raw_line_in = switch (item) {
+                    .string => |s| s,
+                    else => return marshalRefuse(allocator, seq, "change_malformed", ""),
+                };
+                const raw_line = std.mem.trimEnd(u8, raw_line_in, "\r\n");
+                if (raw_line.len + 1 > MaxChangeBytes) {
+                    return marshalRefuse(allocator, seq, "change_too_large", "");
+                }
+
+                var c = json.parseChange(allocator, raw_line) catch |err| {
+                    return marshalErrRefuse(allocator, seq, err);
+                };
+                defer c.deinit(allocator);
+
+                if (!std.mem.eql(u8, c.stream, loaded.stream.id)) {
+                    return marshalRefuse(allocator, seq, "change_malformed", "stream mismatch");
+                }
+                sign.validateCommitMessage(c.message) catch |err| {
+                    return marshalErrRefuse(allocator, seq, err);
+                };
+
+                const ok = ed25519.verifyChange(allocator, &c) catch |err| {
+                    return marshalErrRefuse(allocator, seq, err);
+                };
+                if (!ok) {
+                    return marshalRefuse(allocator, seq, "sig_invalid", "");
+                }
+
+                if (self.server.allow_authors) |allowed| {
+                    var found = false;
+                    for (allowed) |pub_hex| {
+                        if (std.mem.eql(u8, pub_hex, c.author)) {
+                            found = true;
+                            break;
+                        }
+                    }
+                    if (!found) {
+                        return marshalRefuse(allocator, seq, "author_not_allowed", c.author);
+                    }
+                }
+
+                if (by_id.get(c.id)) |existing| {
+                    if (!std.mem.eql(u8, existing, raw_line)) {
+                        return marshalRefuse(allocator, seq, "change_malformed", "id conflict");
+                    }
+                    continue;
+                }
+
+                if (store.optStrEql(c.parent, cur_head)) {
+                    return marshalRefuse(allocator, seq, "change_malformed", "extends head");
+                }
+                if (c.parent) |p| {
+                    if (!known.contains(p)) {
+                        return marshalRefuse(allocator, seq, "change_malformed", "detached parent unknown");
+                    }
+                }
+
+                const key = allocator.dupe(u8, c.id) catch |err| return marshalErrRefuse(allocator, seq, err);
+                batch_keys.append(allocator, key) catch |err| {
+                    allocator.free(key);
+                    return marshalErrRefuse(allocator, seq, err);
+                };
+                by_id.put(key, raw_line) catch |err| return marshalErrRefuse(allocator, seq, err);
+                known.put(key, {}) catch |err| return marshalErrRefuse(allocator, seq, err);
+
+                log_buf.appendSlice(allocator, raw_line) catch |err| return marshalErrRefuse(allocator, seq, err);
+                log_buf.append(allocator, '\n') catch |err| return marshalErrRefuse(allocator, seq, err);
+                stored += 1;
+            }
+
+            if (idx.change_count + stored > store.MaxChanges) {
+                return marshalRefuse(allocator, seq, "store_too_large", "changes");
+            }
+            const log_path = store.streamLogPath(allocator, self.server.store_root, loaded.stream.id) catch |err| {
+                return marshalErrRefuse(allocator, seq, err);
+            };
+            defer allocator.free(log_path);
+            checkLogAppendBound(allocator, self.server.fs, log_path, log_buf.items.len) catch |err| {
+                return marshalErrRefuse(allocator, seq, err);
+            };
+            self.server.fs.appendSync(allocator, log_path, log_buf.items) catch |err| {
+                return marshalErrRefuse(allocator, seq, err);
+            };
+
+            var out: std.ArrayList(u8) = .empty;
+            errdefer out.deinit(allocator);
+            try out.print(allocator, "{{\"seq\":{d},\"ok\":true,\"head\":", .{seq});
+            if (cur_head) |h| {
+                try json.appendGoJSONString(&out, allocator, h);
+            } else {
+                try out.appendSlice(allocator, "null");
+            }
+            try out.print(allocator, ",\"stored\":{d}}}", .{stored});
+            return out.toOwnedSlice(allocator);
+        }
     };
 
     fn marshalRefuse(allocator: Allocator, seq: u64, code: []const u8, detail: []const u8) ![]u8 {
@@ -2927,13 +3402,10 @@ test "sync bounds: a producer-valid >1 MiB change appends and reads back (#60)" 
 
     // fetchAndVerifyStreamChanges is the clone/pull receive path: it must
     // accept and verify the line rather than refusing `change_too_large`.
-    const fetched = try fetchAndVerifyStreamChanges(gpa, &client, record, null, null);
-    defer {
-        for (fetched) |l| gpa.free(l);
-        gpa.free(fetched);
-    }
-    try std.testing.expectEqual(@as(usize, 1), fetched.len);
-    try std.testing.expectEqualStrings(raw_line, fetched[0]);
+    const fetched = try fetchAndVerifyStreamChanges(gpa, &client, record, null, null, null);
+    defer fetched.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 1), fetched.lines.len);
+    try std.testing.expectEqualStrings(raw_line, fetched.lines[0]);
 }
 
 test "change bound: a raw change line over the 4 MiB bound refuses change_too_large (#60)" {
@@ -2973,7 +3445,109 @@ test "change bound: a raw change line over the 4 MiB bound refuses change_too_la
     const st = store.Stream{ .id = "x", .name = "main", .created = 0 };
     try std.testing.expectError(
         error.Refuse,
-        fetchAndVerifyStreamChanges(gpa, &client, st, null, null),
+        fetchAndVerifyStreamChanges(gpa, &client, st, null, null, null),
     );
     try std.testing.expectEqualStrings("change_too_large", fsys.last_refuse.code());
+}
+
+test "deposit: detached lines land without moving head; bad deposits refuse by name (#73)" {
+    const gpa = std.testing.allocator;
+    var arena_inst = std.heap.ArenaAllocator.init(gpa);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+
+    var srv_mem = try fsys.MemFS.init(gpa);
+    defer srv_mem.deinit();
+    const srv_fs = srv_mem.fs();
+    try srv_fs.mkdir(gpa, "/srv/FLINT/streams");
+
+    var server = InProcServer{
+        .allocator = gpa,
+        .fs = srv_fs,
+        .store_root = "/srv/FLINT",
+    };
+    const transport = try InProcServer.dial(&server, gpa, std.testing.io, "tcp://127.0.0.1:4748");
+    var client = SyncClient.init(gpa, transport);
+    defer client.deinit();
+
+    const stream_id = "0199de2d-dc00-7000-8000-00000000aa60";
+    const record = store.Stream{ .id = stream_id, .name = "main", .created = 1 };
+    try client.create(record);
+
+    var seed = ed25519.parseHex32Lower("9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60").?;
+    const mk = struct {
+        fn line(a: Allocator, sid: []const u8, id: []const u8, parent: ?[]const u8, ts: i64, s: *[32]u8) ![]u8 {
+            var c = store.Change{
+                .id = id,
+                .stream = sid,
+                .ts = ts,
+                .author = "",
+                .message = "deposit-test",
+                .ops = &.{},
+                .sig = "",
+                .parent = parent,
+            };
+            try ed25519.signChangeWithSeed(a, &c, s);
+            const marshaled = try json.marshalChangeLine(a, c);
+            return try a.dupe(u8, std.mem.trimEnd(u8, marshaled, "\r\n"));
+        }
+    }.line;
+
+    const c1 = try mk(arena, stream_id, "0199de2d-dc00-7000-8000-0000000000c1", null, 1760000000001, &seed);
+    const new_head = try client.append(stream_id, null, &.{c1});
+    defer gpa.free(new_head);
+
+    const expectRefuse = struct {
+        fn check(code: []const u8, res: anyerror!SyncClient.DepositResult) !void {
+            try std.testing.expectError(error.Refuse, res);
+            try std.testing.expectEqualStrings(code, fsys.last_refuse.code());
+        }
+    }.check;
+
+    // A Change extending the head is an append, not a deposit.
+    const ext = try mk(arena, stream_id, "0199de2d-dc00-7000-8000-0000000000e1", "0199de2d-dc00-7000-8000-0000000000c1", 1760000000002, &seed);
+    try expectRefuse("change_malformed", client.deposit(stream_id, &.{ext}));
+    // A detached Change whose parent is unknown refuses.
+    const orphan = try mk(arena, stream_id, "0199de2d-dc00-7000-8000-0000000000d1", "0199de2d-dc00-7000-8000-000000000fff", 1760000000003, &seed);
+    try expectRefuse("change_malformed", client.deposit(stream_id, &.{orphan}));
+    // A Change signed for a different stream refuses.
+    const wrong_stream = try mk(arena, "0199de2d-dc00-7000-8000-000000000abe", "0199de2d-dc00-7000-8000-0000000000d2", "0199de2d-dc00-7000-8000-0000000000c1", 1760000000004, &seed);
+    try expectRefuse("change_malformed", client.deposit(stream_id, &.{wrong_stream}));
+    // A tampered signature refuses.
+    const tampered = try gpa.dupe(u8, orphan);
+    defer gpa.free(tampered);
+    tampered[tampered.len - 4] = if (tampered[tampered.len - 4] == '0') '1' else '0';
+    try expectRefuse("sig_invalid", client.deposit(stream_id, &.{tampered}));
+
+    // A detached root and a detached child of c1 are accepted; head stays c1.
+    const d_root = try mk(arena, stream_id, "0199de2d-dc00-7000-8000-0000000000d3", null, 1760000000005, &seed);
+    const d_child = try mk(arena, stream_id, "0199de2d-dc00-7000-8000-0000000000d4", "0199de2d-dc00-7000-8000-0000000000d3", 1760000000006, &seed);
+    {
+        var res = try client.deposit(stream_id, &.{ d_root, d_child });
+        defer res.deinit(gpa);
+        try std.testing.expectEqual(@as(usize, 2), res.stored);
+        try std.testing.expectEqualStrings("0199de2d-dc00-7000-8000-0000000000c1", res.head.?);
+    }
+    // Re-deposit is idempotent: identical bytes deduplicate.
+    {
+        var res = try client.deposit(stream_id, &.{d_child});
+        defer res.deinit(gpa);
+        try std.testing.expectEqual(@as(usize, 0), res.stored);
+    }
+    // Same id under different bytes is an id conflict, not a duplicate.
+    const conflict = try mk(arena, stream_id, "0199de2d-dc00-7000-8000-0000000000d3", null, 1760000000099, &seed);
+    try expectRefuse("change_malformed", client.deposit(stream_id, &.{conflict}));
+
+    // The record head never moved and the log holds the appended then the
+    // deposited lines in order.
+    var idx = try store.loadStoreIndex(gpa, srv_fs, server.store_root);
+    defer idx.deinit();
+    try std.testing.expectEqualStrings("0199de2d-dc00-7000-8000-0000000000c1", idx.streamByID(stream_id).?.head.?);
+
+    const log_lines = try readStreamRawLines(gpa, srv_fs, server.store_root, stream_id);
+    defer freeRawLines(gpa, log_lines);
+    try std.testing.expectEqual(@as(usize, 3), log_lines.len);
+    try std.testing.expectEqualStrings(c1, log_lines[0]);
+    try std.testing.expectEqualStrings(d_root, log_lines[1]);
+    try std.testing.expectEqualStrings(d_child, log_lines[2]);
 }
