@@ -356,7 +356,6 @@ pub fn runWithContext(ctx: Context, args: []const []const u8) u8 {
     defer ctx.allocator.free(root);
 
     return jsond.dispatchStoreVerb(&ctx, rep_opt, out_w, uuid_gen, root, verb, sub);
-
 }
 
 test {

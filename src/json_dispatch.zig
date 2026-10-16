@@ -8,6 +8,7 @@ const report = @import("report.zig");
 const workspace = @import("workspace.zig");
 const sign = @import("sign.zig");
 const merge = @import("merge.zig");
+const content = @import("content.zig");
 const sync = @import("sync.zig");
 const ed25519 = @import("ed25519.zig");
 const uuid = @import("uuid.zig");
@@ -113,6 +114,13 @@ pub fn dispatchStoreVerb(
 
     if (std.mem.eql(u8, verb, "log")) {
         sign.cmdLog(ctx.allocator, ctx.fs, root, out_w, sub) catch |err| {
+            return fail(rep, err, ctx);
+        };
+        return ok(rep, 0, ctx);
+    }
+
+    if (std.mem.eql(u8, verb, "checkout")) {
+        content.cmdCheckout(ctx.allocator, ctx.fs, root, out_w, sub) catch |err| {
             return fail(rep, err, ctx);
         };
         return ok(rep, 0, ctx);
