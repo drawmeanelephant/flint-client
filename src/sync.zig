@@ -46,6 +46,22 @@ pub const TcpDialOptions = struct {
     read_timeout_ms: u64 = default_read_timeout_ms,
 };
 
+/// Refuses `store_too_large file` when `extra` appended bytes would push the
+/// stream log at `log_path` past `MaxFileReadBytes` — the bound `verify` and
+/// every log reader enforce, so an oversized pull/clone would brick the local
+/// store (#59).
+fn checkLogAppendBound(allocator: Allocator, fs: FS, log_path: []const u8, extra: usize) !void {
+    var existing: usize = 0;
+    if (fs.exists(allocator, log_path)) {
+        const b = try fs.readFile(allocator, log_path, store.MaxFileReadBytes);
+        defer allocator.free(b);
+        existing = b.len;
+    }
+    if (existing + extra > store.MaxFileReadBytes) {
+        return fsys.refuse("store_too_large", "file");
+    }
+}
+
 fn readStreamRawLines(allocator: Allocator, fs: FS, root: []const u8, stream_id: []const u8) ![][]u8 {
     const p = try store.streamLogPath(allocator, root, stream_id);
     defer allocator.free(p);
@@ -1219,6 +1235,7 @@ pub fn cmdClone(
                     try log_buf.appendSlice(allocator, line);
                     try log_buf.append(allocator, '\n');
                 }
+                try checkLogAppendBound(allocator, fs, log_path, log_buf.items.len);
                 try fs.appendSync(allocator, log_path, log_buf.items);
             }
         } else if (p.raw_lines.len > 0) {
@@ -1228,6 +1245,7 @@ pub fn cmdClone(
                 try log_buf.appendSlice(allocator, line);
                 try log_buf.append(allocator, '\n');
             }
+            try checkLogAppendBound(allocator, fs, log_path, log_buf.items.len);
             try fs.writeFileSafe(allocator, log_path, log_buf.items);
         }
         try store.writeStreamRecord(allocator, fs, root, p.record);
@@ -1706,6 +1724,12 @@ pub fn cmdPull(
     var last_change = try json.parseChange(allocator, fetched_lines[fetched_lines.len - 1]);
     defer last_change.deinit(allocator);
 
+    // The signed chain must reach the remote record's advertised head; a
+    // proper signed prefix is still an incomplete pull (#58).
+    if (!std.mem.eql(u8, last_change.id, remote_head)) {
+        return fsys.refuse("stream_malformed", "head mismatch");
+    }
+
     // Append raw lines to `streams/<id>.jsonl` first, then rewrite `streams/<id>.json`.
     var append_buf: std.ArrayList(u8) = .empty;
     defer append_buf.deinit(allocator);
@@ -1716,6 +1740,7 @@ pub fn cmdPull(
 
     const log_path = try store.streamLogPath(allocator, root, loaded.stream.id);
     defer allocator.free(log_path);
+    try checkLogAppendBound(allocator, fs, log_path, append_buf.items.len);
     try fs.appendSync(allocator, log_path, append_buf.items);
 
     const updated_stream = store.Stream{
@@ -1870,6 +1895,7 @@ fn pullResetToRemote(
     const log_path = try store.streamLogPath(allocator, root, loaded.stream.id);
     defer allocator.free(log_path);
     if (append_buf.items.len > 0) {
+        try checkLogAppendBound(allocator, fs, log_path, append_buf.items.len);
         try fs.appendSync(allocator, log_path, append_buf.items);
     }
 

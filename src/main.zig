@@ -442,9 +442,10 @@ test {
     _ = merge;
     _ = sync;
     _ = release;
+    _ = @import("sync_mutate_test.zig");
 }
 
-const TestHarness = struct {
+pub const TestHarness = struct {
     allocator: Allocator,
     mem: fsys.MemFS,
     uuid_gen: uuid.UUIDGen,
@@ -458,7 +459,7 @@ const TestHarness = struct {
     sync_dial: ?sync.DialFn = null,
     sync_dial_ctx: ?*anyopaque = null,
 
-    fn init(allocator: Allocator) !*TestHarness {
+    pub fn init(allocator: Allocator) !*TestHarness {
         const h = try allocator.create(TestHarness);
         h.* = .{
             .allocator = allocator,
@@ -469,7 +470,7 @@ const TestHarness = struct {
         return h;
     }
 
-    fn deinit(self: *TestHarness) void {
+    pub fn deinit(self: *TestHarness) void {
         self.mem.deinit();
         self.allocator.destroy(self);
     }
@@ -487,7 +488,7 @@ const TestHarness = struct {
         }
     }
 
-    fn runCmd(self: *TestHarness, args: []const []const u8) !struct { rc: u8, out: []u8 } {
+    pub fn runCmd(self: *TestHarness, args: []const []const u8) !struct { rc: u8, out: []u8 } {
         var out_w: Io.Writer.Allocating = .init(self.allocator);
         errdefer out_w.deinit();
         var err_w: Io.Writer.Allocating = .init(self.allocator);
@@ -1990,7 +1991,7 @@ test "HostFS writeFileSafe and appendSync crash-safe file operations" {
     try std.testing.expectEqualStrings("ATOMS.jsonl", entries[0].name);
 }
 
-const rfc8032_seed_hex = "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60";
+pub const rfc8032_seed_hex = "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60";
 const rfc8032_pub_hex = "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a";
 
 test "commit, log, verify, and roll-forward" {
