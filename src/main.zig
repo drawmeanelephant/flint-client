@@ -378,6 +378,7 @@ test {
     _ = @import("json_results_test.zig");
     _ = @import("sync_scenarios_test.zig");
     _ = @import("content_scenarios_test.zig");
+    _ = @import("content_sync_test.zig");
 }
 
 pub const TestHarness = @import("test_harness.zig").TestHarness;

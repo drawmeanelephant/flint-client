@@ -56,6 +56,14 @@ The broader remote journey is:
 zig test src/main.zig --test-filter 'M106e remote verbs'
 ```
 
+The complete-source sync journey (B3, `docs/flint-blobs-spec.md` §10) runs
+against a real flintd on loopback — a fresh `clone` + `checkout` must
+reproduce the publisher's tree byte-identically from FLINT content alone:
+
+```sh
+FLINTD=/path/to/flint-server/zig-out/bin/flintd python3 tools/content_sync_journey.py
+```
+
 For an existing, explicitly authorized external flintd, configure
 `FLINT_REMOTE=tcp://host:port` and a private key-file path in
 `FLINT_AUTH_KEY`, using that server's documented auth/author policy.
