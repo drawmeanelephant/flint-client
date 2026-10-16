@@ -761,6 +761,36 @@ pub fn cmdVerify(
     if (std.mem.eql(u8, arg, "--all")) {
         var idx = try store.loadStoreIndex(allocator, fs, store_root);
         defer idx.deinit();
+        // Per-log id uniqueness (#100): a repeated Change id in one stream
+        // log is structurally invalid even though each line is a valid
+        // signed Change. The same id across different logs is legal (a
+        // deposited detached line shares its id), so the check is per-file.
+        const s_dir = try store.streamsDir(allocator, store_root);
+        defer allocator.free(s_dir);
+        if (fs.exists(allocator, s_dir)) {
+            const entries = try fs.list(allocator, s_dir);
+            defer FS.freeDirEntries(allocator, entries);
+            for (entries) |e| {
+                if (e.is_dir or !std.mem.endsWith(u8, e.name, ".jsonl")) continue;
+                const sid = e.name[0 .. e.name.len - ".jsonl".len];
+                const log_changes = try store.readStreamChanges(allocator, fs, store_root, sid);
+                defer store.freeChanges(allocator, log_changes);
+                var ids = std.StringHashMap(void).init(allocator);
+                defer ids.deinit();
+                for (log_changes) |c| {
+                    const g = try ids.getOrPut(c.id);
+                    if (g.found_existing) {
+                        const detail = try std.fmt.allocPrint(
+                            allocator,
+                            "duplicated change {s} in stream {s}",
+                            .{ c.id, sid },
+                        );
+                        defer allocator.free(detail);
+                        return fsys.refuse("stream_malformed", detail);
+                    }
+                }
+            }
+        }
         const changes = try store.loadAllStreamChanges(allocator, fs, store_root, &idx);
         defer store.freeChanges(allocator, changes);
         for (changes) |*c| {
@@ -848,4 +878,51 @@ test "Pinned sig vectors (testdata/sig) and RFC 8032 §7.1 TEST 1 oracle" {
     defer bad.deinit(gpa);
     try validateParsedChange(gpa, &bad);
     try std.testing.expect(!(try verifyChange(gpa, &bad)));
+}
+
+test "verify --all: a repeated Change id in a stream log refuses stream_malformed (#100)" {
+    const gpa = std.testing.allocator;
+    var mfs = try fsys.MemFS.init(gpa);
+    defer mfs.deinit();
+    const fs = mfs.fs();
+    const root = "/host/FLINT";
+    try fs.mkdir(gpa, root);
+    const s_dir = try store.streamsDir(gpa, root);
+    defer gpa.free(s_dir);
+    try fs.mkdir(gpa, s_dir);
+
+    // One signed Change appended to its stream log twice: each line verifies,
+    // the log is still invalid — verify --all names the stream + id.
+    const seed = parseHex32Lower("9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60").?;
+    const sid = "0199de2d-dc00-7000-8000-000000000020";
+    var c = store.Change{
+        .id = try gpa.dupe(u8, "0199de2d-dc00-7000-8000-000000000301"),
+        .stream = try gpa.dupe(u8, sid),
+        .parent = null,
+        .ts = 1760000000000,
+        .author = try gpa.dupe(u8, ""),
+        .message = try gpa.dupe(u8, "c1"),
+        .ops = &.{},
+        .merged = null,
+        .sig = try gpa.dupe(u8, ""),
+    };
+    defer c.deinit(gpa);
+    var seed_copy = seed;
+    try signChangeWithSeed(gpa, &c, &seed_copy);
+    const line = try json.marshalChangeLine(gpa, c);
+    defer gpa.free(line);
+    const log_path = try store.streamLogPath(gpa, root, sid);
+    defer gpa.free(log_path);
+    try fs.appendSync(gpa, log_path, line);
+    try fs.appendSync(gpa, log_path, line);
+
+    var aw: std.Io.Writer.Allocating = .init(gpa);
+    defer aw.deinit();
+    const rc = cmdVerify(gpa, fs, root, &.{"--all"}, &aw.writer) catch |err| {
+        try std.testing.expectEqual(error.Refuse, err);
+        try std.testing.expectEqualStrings("stream_malformed", fsys.last_refuse.code());
+        try std.testing.expect(std.mem.indexOf(u8, fsys.last_refuse.detail(), sid) != null);
+        return;
+    };
+    return std.testing.expectEqual(@as(u8, 1), rc);
 }

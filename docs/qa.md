@@ -62,6 +62,13 @@ reproduce the publisher's tree byte-identically from FLINT content alone:
 
 ```sh
 FLINTD=/path/to/flint-server/zig-out/bin/flintd python3 tools/content_sync_journey.py
+
+The hostile-server suite (`tools/hostile_server.py`, mutating-proxy
+clone/pull/push scenarios) is part of the automated gate:
+`tools/tests/test_hostile_server.py` runs it under `tools/check.py`,
+skipping with an explicit reason when no real `flintd` is found
+(`FLINTD=<path>` overrides the default sibling checkout). A CI run without
+a built `flintd` skips real-server tests — a skip is not a pass.
 ```
 
 For an existing, explicitly authorized external flintd, configure

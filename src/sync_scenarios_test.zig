@@ -17,7 +17,7 @@ const MutatingDial = struct {
     server: *sync.InProcServer,
     mode: Mode,
 
-    const Mode = enum { short_prefix, pad_pages };
+    const Mode = enum { short_prefix, pad_pages, duplicate };
     const PAD_TO: usize = 900_000;
 
     fn dial(dial_ctx: ?*anyopaque, allocator: Allocator, io: Io, remote_url: []const u8) anyerror!sync.Transport {
@@ -110,6 +110,24 @@ const MutatingDial = struct {
                 .pad_pages => {
                     if (self.read_calls == 1) return rewrite(resp, 3, true, PAD_TO, allocator);
                     return rewrite(resp, std.math.maxInt(usize), false, PAD_TO, allocator);
+                },
+                // Every signed line twice, bytes identical (#99).
+                .duplicate => {
+                    const r = try readElements(allocator, resp);
+                    defer allocator.free(r.elems);
+                    var out: std.ArrayList(u8) = .empty;
+                    errdefer out.deinit(allocator);
+                    try out.appendSlice(allocator, r.prefix);
+                    for (0..2) |_| {
+                        for (r.elems) |e| {
+                            try out.appendSlice(allocator, e);
+                            try out.append(allocator, ',');
+                        }
+                    }
+                    // Trailing comma from the doubling loop must go.
+                    if (r.elems.len > 0) _ = out.pop();
+                    try out.appendSlice(allocator, "],\"more\":false}}");
+                    return out.toOwnedSlice(allocator);
                 },
             }
         }
@@ -1850,4 +1868,111 @@ test "--json: push/clone/pull envelopes; a lost append ack reports unknown, not 
         try std.testing.expectEqual(@as(usize, 1), affected.len);
         try std.testing.expectEqual(@as(i64, 1), o.get("data").?.object.get("received").?.integer);
     }
+}
+
+test "sync: repeated Change ids in a read reply refuse all-or-nothing on clone, pull, pull --reset (#99)" {
+    const gpa = std.testing.allocator;
+
+    var srv_mem = try fsys.MemFS.init(gpa);
+    defer srv_mem.deinit();
+    const srv_fs = srv_mem.fs();
+    try srv_fs.mkdir(gpa, "/srv/FLINT/streams");
+
+    var server = sync.InProcServer{
+        .allocator = gpa,
+        .fs = srv_fs,
+        .store_root = "/srv/FLINT",
+    };
+
+    var ha = try TestHarness.init(gpa);
+    defer ha.deinit();
+    ha.env_sign_key = rfc8032_seed_hex;
+    ha.sync_dial = sync.InProcServer.dial;
+    ha.sync_dial_ctx = &server;
+    const fsa = ha.mem.fs();
+
+    try fsa.writeFileSafe(gpa, "/host/SRCA/calc.go", "package calc\n\nfunc X() int {\n\treturn 1\n}\n");
+    for ([_][]const []const u8{
+        &.{ "init", "--name=a", "--src=/host/SRCA" },
+        &.{ "add", "/host/SRCA" },
+        &.{ "commit", "-m", "c1" },
+        &.{ "push", "--remote=tcp://127.0.0.1:4748" },
+    }) |cmd| {
+        const res = try ha.runCmd(cmd);
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+    }
+
+    // 1. clone through the repeating peer refuses; no store is created.
+    var hb = try TestHarness.init(gpa);
+    defer hb.deinit();
+    const fsb = hb.mem.fs();
+    var md = MutatingDial{ .server = &server, .mode = .duplicate };
+    hb.sync_dial = MutatingDial.dial;
+    hb.sync_dial_ctx = &md;
+    {
+        const res = try hb.runCmd(&.{
+            "clone",
+            "tcp://127.0.0.1:4748",
+            "--stream=main",
+            "--name=b",
+            "--src=/host/SRCB",
+        });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 1), res.rc);
+        try std.testing.expect(std.mem.startsWith(u8, res.out, "flint: refuse change_malformed"));
+    }
+
+    // 2. Honest clone then pull through the same peer: refuse + byte-identical.
+    hb.sync_dial = sync.InProcServer.dial;
+    hb.sync_dial_ctx = &server;
+    {
+        const res = try hb.runCmd(&.{
+            "clone",
+            "tcp://127.0.0.1:4748",
+            "--stream=main",
+            "--name=b",
+            "--src=/host/SRCB",
+        });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+    }
+    {
+        const src = try gpa.dupe(u8, "package calc\n\nfunc X() int {\n\treturn 2\n}\n");
+        defer gpa.free(src);
+        try fsa.writeFileSafe(gpa, "/host/SRCA/calc.go", src);
+        ha.now += 5;
+        for ([_][]const []const u8{
+            &.{ "add", "/host/SRCA" },
+            &.{ "commit", "-m", "c2" },
+            &.{"push"},
+        }) |cmd| {
+            const res = try ha.runCmd(cmd);
+            defer gpa.free(res.out);
+            try std.testing.expectEqual(@as(u8, 0), res.rc);
+        }
+    }
+
+    var idx = try store.loadStoreIndex(gpa, fsb, hb.root);
+    defer idx.deinit();
+    const log_path = try store.streamLogPath(gpa, hb.root, idx.streamByName("main").?.id);
+    defer gpa.free(log_path);
+    const log_before = try fsb.readFile(gpa, log_path, store.MaxFileReadBytes);
+    defer gpa.free(log_before);
+
+    hb.sync_dial = MutatingDial.dial;
+    hb.sync_dial_ctx = &md;
+    for ([_][]const []const u8{
+        &.{ "pull", "--remote=tcp://127.0.0.1:4749" },
+        &.{ "pull", "--remote=tcp://127.0.0.1:4749", "--reset" },
+    }) |cmd| {
+        const res = try hb.runCmd(cmd);
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 1), res.rc);
+        try std.testing.expect(std.mem.startsWith(u8, res.out, "flint: refuse change_malformed"));
+    }
+
+    const log_after = try fsb.readFile(gpa, log_path, store.MaxFileReadBytes);
+    defer gpa.free(log_after);
+    try std.testing.expectEqualStrings(log_before, log_after);
 }

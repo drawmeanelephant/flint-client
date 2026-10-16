@@ -72,6 +72,25 @@ stream/change identifiers, and reproduction without exposing keys/source.
 Recover to a separate store from a verified backup or trusted remote only
 after a maintainer reviews the history. Keep the original for diagnosis.
 
+## Stream log with a repeated Change id
+
+`flint verify --all` refuses `stream_malformed` naming the duplicated Change
+and its stream log: an append-only log carries one line per id, and a repeat
+is structurally invalid even though the line itself verifies (inflation can
+arrive from a hostile or buggy peer response — the ingest path refuses it).
+Detection changes no bytes; the store stays readable, and `status` still
+loads it.
+
+Recovery is explicit only — never truncate the log or rewrite the stream:
+
+1. Copy the entire store directory to a backup location before touching it.
+2. On a *copy*, remove the duplicated line(s) from `streams/<id>.jsonl`
+   (the first occurrence is canonical; identical-byte repeats later in the
+   log are the inflation).
+3. `flint verify --all` against the copy confirms the log is sound again.
+4. If the copy verifies, replace the original directory with the copy;
+   otherwise restore the backup and escalate with the refusal detail.
+
 ## Missing/bad signing or auth key
 
 Use a key **name** or private key-file path, not a seed literal. Check that

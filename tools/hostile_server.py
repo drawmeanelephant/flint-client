@@ -11,6 +11,7 @@ Needs a flintd binary: FLINTD=<path> (default ../flint-server/zig-out/bin/flintd
 
 import json
 import os
+import shutil
 from pathlib import Path
 import re
 import socket
@@ -192,9 +193,13 @@ class Fixture:
         (path / "src").mkdir(parents=True)
         return path
 
-    def close(self):
+    def close(self, keep=False):
         self.server.terminate()
         self.server.wait()
+        if keep:
+            print("fixture kept at %s" % self.tmp)
+        else:
+            shutil.rmtree(self.tmp, ignore_errors=True)
 
 
 def tree(path):
@@ -316,6 +321,34 @@ def pull_padded_pages(fx):
     record("pull: padded pages exceed 4 MiB log bound", not problems, "; ".join(problems))
 
 
+def pull_reset_duplicated(fx):
+    """`pull --reset` must refuse a reply repeating Change ids, all-or-
+    nothing — never append a repeat (#99)."""
+    client = fx.new_client("resetdup")
+    rc, out, _ = flint(f"--store={client}", "clone", f"tcp://127.0.0.1:{fx.port}", "--stream=main", "--name=main", f"--src={client / 'src'}")
+    assert rc == 0, out
+    flint(f"--store={client}", "keygen", "--name=b")
+    fx.commit()
+    flint(f"--store={fx.author}", "push", f"--remote=tcp://127.0.0.1:{fx.port}")
+    before = tree(client)
+    proxy = Proxy(fx.port, on("read", mutate_changes(lambda c: c + c)))
+    remote = f"tcp://127.0.0.1:{proxy.port}"
+    rc, out, secs = flint(f"--store={client}", "pull", f"--remote={remote}", "--stream=main", "--reset", "--read-timeout=2")
+    proxy.close()
+    problems = []
+    if rc == "HANG":
+        problems.append("hung >%ds" % TIMEOUT)
+    elif rc == 0:
+        problems.append("accepted duplicated changes: " + out.strip()[-80:])
+    if rc != 0 and not problems:
+        if tree(client) != before:
+            problems.append("failed pull changed the store")
+        vrc, vout, _ = flint(f"--store={client}", "verify", "--all")
+        if vrc != 0:
+            problems.append("store fails verify afterwards")
+    record("pull --reset: duplicated changes", not problems, "; ".join(problems))
+
+
 def push_hang(fx):
     proxy = Proxy(fx.port, on("hello", lambda r, raw: "HANG"))
     fx.commit()
@@ -329,6 +362,7 @@ def main():
         if not path.exists():
             print("missing binary: %s (zig build; set FLINTD)" % path, file=sys.stderr)
             return 2
+    print("flintd: %s" % FLINTD)
     fx = Fixture()
     try:
         for title, op, mutate, must in SCENARIOS:
@@ -338,9 +372,10 @@ def main():
             run_scenario(fx, "clone", title, op, mutate, must)
         pull_prefix(fx)
         pull_padded_pages(fx)
+        pull_reset_duplicated(fx)
         push_hang(fx)
     finally:
-        fx.close()
+        fx.close(keep=any(not ok for _, ok in RESULTS))
     failed = [n for n, ok in RESULTS if not ok]
     print("\n%d scenarios, %d failed" % (len(RESULTS), len(failed)))
     return 1 if failed else 0

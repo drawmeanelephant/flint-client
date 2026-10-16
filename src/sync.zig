@@ -1071,6 +1071,17 @@ fn fetchAndVerifyStreamChanges(
     var chain_tip: ?[]u8 = if (expected_first_parent) |p| try allocator.dupe(u8, p) else null;
     errdefer if (chain_tip) |t| allocator.free(t);
 
+    // Ids fetched in THIS response must be unique — a real server's log has
+    // one line per id, so a repeated id is a malformed reply, not a deposit
+    // or a dedupe case (#99). Identical bytes refuse `duplicated change`;
+    // different bytes under the same id are an id conflict.
+    var fetched_ids = std.StringHashMap([]const u8).init(allocator);
+    defer {
+        var fit = fetched_ids.keyIterator();
+        while (fit.next()) |k| allocator.free(k.*);
+        fetched_ids.deinit();
+    }
+
     for (all_lines.items) |raw_line| {
         if (raw_line.len + 1 > MaxChangeBytes) {
             return fsys.refuse("change_too_large", "");
@@ -1082,6 +1093,13 @@ fn fetchAndVerifyStreamChanges(
             return fsys.refuse("change_malformed", "stream mismatch");
         }
         try sign.validateCommitMessage(c.message);
+
+        if (fetched_ids.get(c.id)) |prev_line| {
+            if (!std.mem.eql(u8, prev_line, raw_line)) {
+                return fsys.refuse("change_malformed", "id conflict");
+            }
+            return fsys.refuse("change_malformed", "duplicated change");
+        }
 
         const on_chain = if (chain_tip) |tip|
             c.parent != null and std.mem.eql(u8, c.parent.?, tip)
@@ -1104,10 +1122,12 @@ fn fetchAndVerifyStreamChanges(
             return fsys.refuse("sig_invalid", "");
         }
 
-        // `c` is freed at iteration end — dupe the id for the seen set.
+        // `c` is freed at iteration end — dupe the id for the seen sets.
         const key = try allocator.dupe(u8, c.id);
         try seen_owned.append(allocator, key);
         try seen.put(key, {});
+        const key2 = try allocator.dupe(u8, c.id);
+        try fetched_ids.put(key2, raw_line);
     }
 
     return .{
