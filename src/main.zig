@@ -16,6 +16,7 @@ pub const merge = @import("merge.zig");
 pub const sync = @import("sync.zig");
 pub const release = @import("release.zig");
 pub const content = @import("content.zig");
+pub const handoff = @import("handoff.zig");
 pub const report = @import("report.zig");
 const jsond = @import("json_dispatch.zig");
 
@@ -110,6 +111,11 @@ fn printHelp(w: *Io.Writer) void {
         \\  push [--remote=<url>] [--stream=<s>] [--ws=<n>] [--auth-key=<file>]
         \\  pull [--remote=<url>] [--stream=<s>] [--ws=<n>] [--auth-key=<file>] [--reset]
         \\  checkout [--stream=<s>] [--ws=<n>] --change=<id>|--head --into=<dir> [--force]
+        \\  handoff propose|attest|accept|supersede|withdraw|list|inspect|verify …
+        \\    propose --stream=<t> --work=<s> [--candidate=<id>] [--base=<id>] [--snapshot=<ref>] -m=<i> [--scope-file=<f>] [--validations=<f>] [--key=<k>]
+        \\    attest <handoff> --command=<s> --result=pass|fail|skip [--key=<k>]
+        \\    accept|supersede|withdraw <handoff> [--note=<s>] [--replacement=<id>] [--key=<k>]
+        \\    list [--stream=<s>] [--state=<s>] · inspect <handoff> · verify <file>
         \\  release --elf=<f> --name=<n> --version=<v> [--manifest-row=<r>] [--ws=<n>] [--key=<k>] [-m <msg>] [--dry-run]
         \\  parse-corpus <dir>
         \\  keygen [--name=<n>]
@@ -302,6 +308,14 @@ pub fn runWithContext(ctx: Context, args: []const []const u8) u8 {
         return jsond.ok(rep_opt, 0, &ctx);
     }
 
+    // `handoff verify <file>` is standalone: no store, nothing written (§8).
+    if (std.mem.eql(u8, verb, "handoff") and sub.len >= 1 and std.mem.eql(u8, sub[0], "verify")) {
+        const rc = handoff.cmdVerifyFile(ctx.allocator, ctx.fs, out_w, sub[1..]) catch |err| {
+            return jsond.fail(rep_opt, err, &ctx);
+        };
+        return jsond.ok(rep_opt, rc, &ctx);
+    }
+
     // `release` resolves the store itself so `--dry-run` works anywhere.
     if (std.mem.eql(u8, verb, "release")) {
         release.cmdRelease(
@@ -332,7 +346,8 @@ pub fn runWithContext(ctx: Context, args: []const []const u8) u8 {
         std.mem.eql(u8, verb, "clone") or
         std.mem.eql(u8, verb, "push") or
         std.mem.eql(u8, verb, "pull") or
-        std.mem.eql(u8, verb, "checkout");
+        std.mem.eql(u8, verb, "checkout") or
+        std.mem.eql(u8, verb, "handoff");
 
     if (!is_known_store_verb) {
         if (rep_opt != null) return jsond.fail(rep_opt, fsys.refuse("usage", ""), &ctx);
@@ -374,11 +389,13 @@ test {
     _ = sync;
     _ = release;
     _ = content;
+    _ = handoff;
     _ = report;
     _ = @import("json_results_test.zig");
     _ = @import("sync_scenarios_test.zig");
     _ = @import("content_scenarios_test.zig");
     _ = @import("content_sync_test.zig");
+    _ = @import("handoff_scenarios_test.zig");
 }
 
 pub const TestHarness = @import("test_harness.zig").TestHarness;

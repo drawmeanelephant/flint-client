@@ -13,6 +13,10 @@ pub const MaxChanges: usize = 4096;
 pub const MaxBlobBytes: usize = 1_800_000;
 /// One signed manifest line per Change: the Change bound's shadow.
 pub const MaxManifests: usize = MaxChanges;
+/// Handoff log bounds (docs/flint-handoffs-spec.md §2): 64 KiB per record
+/// line and a 4096-line log bound shadowing the Change bound.
+pub const MaxHandoffLineBytes: usize = 64 * 1024;
+pub const MaxHandoffRecords: usize = MaxChanges;
 
 /// Span locates an Atom within a source file relative to the workspace src root.
 pub const Span = struct {
@@ -253,6 +257,131 @@ pub const ForkOrigin = struct {
         errdefer allocator.free(s);
         const c = try allocator.dupe(u8, self.change);
         return .{ .stream = s, .change = c };
+    }
+};
+
+/// HandoffValidation is one §1.3 assertion object inside a handoff record's
+/// `validations` array — a signed claim, never executed evidence
+/// (docs/flint-handoffs-spec.md).
+pub const HandoffValidation = struct {
+    command: []const u8,
+    result: []const u8,
+    toolchain: []const u8 = "",
+    env: []const u8 = "",
+    attestor: []const u8,
+    ts: i64,
+    evidence: []const u8 = "",
+
+    pub fn deinit(self: HandoffValidation, allocator: Allocator) void {
+        allocator.free(self.command);
+        allocator.free(self.result);
+        if (self.toolchain.len > 0) allocator.free(self.toolchain);
+        if (self.env.len > 0) allocator.free(self.env);
+        allocator.free(self.attestor);
+        if (self.evidence.len > 0) allocator.free(self.evidence);
+    }
+
+    pub fn clone(self: HandoffValidation, allocator: Allocator) !HandoffValidation {
+        const command = try allocator.dupe(u8, self.command);
+        errdefer allocator.free(command);
+        const result = try allocator.dupe(u8, self.result);
+        errdefer allocator.free(result);
+        const toolchain = if (self.toolchain.len > 0) try allocator.dupe(u8, self.toolchain) else "";
+        errdefer if (toolchain.len > 0) allocator.free(toolchain);
+        const env = if (self.env.len > 0) try allocator.dupe(u8, self.env) else "";
+        errdefer if (env.len > 0) allocator.free(env);
+        const attestor = try allocator.dupe(u8, self.attestor);
+        errdefer allocator.free(attestor);
+        const evidence = if (self.evidence.len > 0) try allocator.dupe(u8, self.evidence) else "";
+        errdefer if (evidence.len > 0) allocator.free(evidence);
+        return .{
+            .command = command,
+            .result = result,
+            .toolchain = toolchain,
+            .env = env,
+            .attestor = attestor,
+            .ts = self.ts,
+            .evidence = evidence,
+        };
+    }
+};
+
+/// HandoffScope is the advisory write-set claim of a `propose` record
+/// (`{"paths":[…],"atoms":[…]}`) — a claim, never a lock (§4).
+pub const HandoffScope = struct {
+    paths: [][]const u8 = &.{},
+    atoms: [][]const u8 = &.{},
+
+    pub fn deinit(self: HandoffScope, allocator: Allocator) void {
+        for (self.paths) |p| allocator.free(p);
+        if (self.paths.len > 0) allocator.free(self.paths);
+        for (self.atoms) |a| allocator.free(a);
+        if (self.atoms.len > 0) allocator.free(self.atoms);
+    }
+
+    pub fn clone(self: HandoffScope, allocator: Allocator) !HandoffScope {
+        const paths = try allocator.alloc([]const u8, self.paths.len);
+        var pi: usize = 0;
+        errdefer {
+            for (paths[0..pi]) |p| allocator.free(p);
+            allocator.free(paths);
+        }
+        while (pi < self.paths.len) : (pi += 1) {
+            paths[pi] = try allocator.dupe(u8, self.paths[pi]);
+        }
+        const atoms = try allocator.alloc([]const u8, self.atoms.len);
+        var ai: usize = 0;
+        errdefer {
+            for (atoms[0..ai]) |a| allocator.free(a);
+            allocator.free(atoms);
+        }
+        while (ai < self.atoms.len) : (ai += 1) {
+            atoms[ai] = try allocator.dupe(u8, self.atoms[ai]);
+        }
+        return .{ .paths = paths, .atoms = atoms };
+    }
+};
+
+/// HandoffRecord is the JSON representation of one signed record line in
+/// `handoffs/<stream-id>.jsonl` (docs/flint-handoffs-spec.md §1). All payload
+/// fields are optional at the encoding layer; requiredness is per `kind`.
+pub const HandoffRecord = struct {
+    id: []const u8,
+    handoff: []const u8,
+    kind: []const u8,
+    stream: []const u8,
+    ts: i64,
+    author: []const u8,
+    sig: []const u8,
+    base: ?[]const u8 = null,
+    work: ?[]const u8 = null,
+    candidate: ?[]const u8 = null,
+    snapshot: ?[]const u8 = null,
+    intent: ?[]const u8 = null,
+    note: ?[]const u8 = null,
+    scope: ?HandoffScope = null,
+    validations: []HandoffValidation = &.{},
+    observed_head: ?[]const u8 = null,
+    replacement: ?[]const u8 = null,
+
+    pub fn deinit(self: HandoffRecord, allocator: Allocator) void {
+        allocator.free(self.id);
+        allocator.free(self.handoff);
+        allocator.free(self.kind);
+        allocator.free(self.stream);
+        allocator.free(self.author);
+        allocator.free(self.sig);
+        if (self.base) |v| allocator.free(v);
+        if (self.work) |v| allocator.free(v);
+        if (self.candidate) |v| allocator.free(v);
+        if (self.snapshot) |v| allocator.free(v);
+        if (self.intent) |v| allocator.free(v);
+        if (self.note) |v| allocator.free(v);
+        if (self.scope) |s| s.deinit(allocator);
+        for (self.validations) |v| v.deinit(allocator);
+        if (self.validations.len > 0) allocator.free(self.validations);
+        if (self.observed_head) |v| allocator.free(v);
+        if (self.replacement) |v| allocator.free(v);
     }
 };
 
@@ -506,6 +635,37 @@ pub fn manifestsDir(allocator: Allocator, root: []const u8) ![]u8 {
 
 pub fn manifestLogPath(allocator: Allocator, root: []const u8, stream_id: []const u8) ![]u8 {
     return std.fmt.allocPrint(allocator, "{s}/manifests/{s}.jsonl", .{ fsys.cleanMemPath(root), stream_id });
+}
+
+pub fn handoffsDir(allocator: Allocator, root: []const u8) ![]u8 {
+    return std.fmt.allocPrint(allocator, "{s}/handoffs", .{fsys.cleanMemPath(root)});
+}
+
+/// HandoffLogPath resolves `<store>/handoffs/<stream-uuid>.jsonl` — the log
+/// keying is the record's `stream` field, always a UUID (never a name).
+pub fn handoffLogPath(allocator: Allocator, root: []const u8, stream_id: []const u8) ![]u8 {
+    if (uuid.parseUUID(stream_id) == null) {
+        return fsys.refuse("handoff_malformed", "stream id");
+    }
+    return std.fmt.allocPrint(allocator, "{s}/handoffs/{s}.jsonl", .{ fsys.cleanMemPath(root), stream_id });
+}
+
+/// KindCode maps a handoff record `kind` to its §1.4 preimage code.
+pub fn handoffKindCode(kind: []const u8) u8 {
+    if (std.mem.eql(u8, kind, "propose")) return 1;
+    if (std.mem.eql(u8, kind, "attest")) return 2;
+    if (std.mem.eql(u8, kind, "accept")) return 3;
+    if (std.mem.eql(u8, kind, "supersede")) return 4;
+    if (std.mem.eql(u8, kind, "withdraw")) return 5;
+    return 0;
+}
+
+/// HandoffResultCode maps a validation `result` to its §1.4 preimage code.
+pub fn handoffResultCode(result: []const u8) u8 {
+    if (std.mem.eql(u8, result, "pass")) return 1;
+    if (std.mem.eql(u8, result, "fail")) return 2;
+    if (std.mem.eql(u8, result, "skip")) return 3;
+    return 0;
 }
 
 /// BlobPath resolves `<store>/blobs/<2 hex>/<62 hex>` for a lowercase hex
@@ -1269,6 +1429,28 @@ pub fn appendManifest(allocator: Allocator, fs: FS, root: []const u8, m: Manifes
     const log_path = try manifestLogPath(allocator, root, m.stream);
     defer allocator.free(log_path);
     try fs.appendSync(allocator, log_path, line);
+}
+
+/// ReadHandoffLines splits a `handoffs/<stream>.jsonl` payload (§2): a final
+/// line missing its `\n` refuses `handoff_torn` (never auto-truncate) and an
+/// empty interior line or over-bound line refuses `handoff_malformed`.
+pub fn readHandoffLines(allocator: Allocator, data: []const u8) ![]const []const u8 {
+    if (data.len == 0) return &.{};
+    if (data[data.len - 1] != '\n') {
+        return fsys.refuse("handoff_torn", "");
+    }
+    const trimmed = data[0 .. data.len - 1];
+    var out: std.ArrayList([]const u8) = .empty;
+    errdefer out.deinit(allocator);
+
+    var it = std.mem.splitScalar(u8, trimmed, '\n');
+    while (it.next()) |line| {
+        if (line.len == 0 or line.len > MaxHandoffLineBytes) {
+            return fsys.refuse("handoff_malformed", "");
+        }
+        try out.append(allocator, line);
+    }
+    return out.toOwnedSlice(allocator);
 }
 
 pub fn validWorkspaceName(name: []const u8) bool {
