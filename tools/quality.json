@@ -17,7 +17,7 @@
       "may_import": ["foundation", "model", "parser"]
     },
     "operations": {
-      "files": ["src/workspace.zig", "src/sign.zig", "src/merge.zig", "src/release.zig"],
+      "files": ["src/workspace.zig", "src/sign.zig", "src/merge.zig", "src/release.zig", "src/content.zig"],
       "may_import": ["foundation", "model", "parser", "operations"]
     },
     "sync": {
@@ -25,7 +25,7 @@
       "may_import": ["foundation", "model", "operations", "sync"]
     },
     "cli": {
-      "files": ["src/main.zig", "src/sync_scenarios_test.zig"],
+      "files": ["src/main.zig", "src/sync_scenarios_test.zig", "src/test_harness.zig", "src/content_scenarios_test.zig"],
       "may_import": ["foundation", "model", "parser", "operations", "sync", "cli"]
     }
   }

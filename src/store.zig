@@ -8,6 +8,11 @@ const json = @import("json.zig");
 pub const MaxFileReadBytes: usize = fsys.MaxFileReadBytes;
 pub const MaxAtoms: usize = 4096;
 pub const MaxChanges: usize = 4096;
+/// Whole-file blob cap (docs/flint-blobs-spec.md §6): over-cap files ride in
+/// manifests as `"blob":null,"reason":"too_large"`.
+pub const MaxBlobBytes: usize = 1_800_000;
+/// One signed manifest line per Change: the Change bound's shadow.
+pub const MaxManifests: usize = MaxChanges;
 
 /// Span locates an Atom within a source file relative to the workspace src root.
 pub const Span = struct {
@@ -371,6 +376,76 @@ pub const RemoteConfig = struct {
     }
 };
 
+/// ManifestEntry is one file row in a snapshot manifest's `files` array
+/// (docs/flint-blobs-spec.md §1). `blob` is the lowercase hex content id, or
+/// empty when the entry is explicitly incomplete (`reason` is then
+/// `"too_large"` or `"unsupported"`).
+pub const ManifestEntry = struct {
+    path: []const u8,
+    blob: []const u8 = "",
+    bytes: u64 = 0,
+    mode: u32 = 0,
+    reason: []const u8 = "",
+
+    pub fn deinit(self: ManifestEntry, allocator: Allocator) void {
+        allocator.free(self.path);
+        if (self.blob.len > 0) allocator.free(self.blob);
+        if (self.reason.len > 0) allocator.free(self.reason);
+    }
+
+    pub fn clone(self: ManifestEntry, allocator: Allocator) !ManifestEntry {
+        const p = try allocator.dupe(u8, self.path);
+        errdefer allocator.free(p);
+        const b = if (self.blob.len > 0) try allocator.dupe(u8, self.blob) else "";
+        errdefer if (b.len > 0) allocator.free(b);
+        const r = if (self.reason.len > 0) try allocator.dupe(u8, self.reason) else "";
+        return .{ .path = p, .blob = b, .bytes = self.bytes, .mode = self.mode, .reason = r };
+    }
+};
+
+/// Manifest is one signed snapshot line in `manifests/<stream-id>.jsonl`: a
+/// complete inventory of the tracked source root bound to `change` by the
+/// Change author's signature.
+pub const Manifest = struct {
+    stream: []const u8,
+    change: []const u8,
+    author: []const u8,
+    files: []ManifestEntry = &.{},
+    sig: []const u8,
+
+    pub fn deinit(self: Manifest, allocator: Allocator) void {
+        allocator.free(self.stream);
+        allocator.free(self.change);
+        allocator.free(self.author);
+        for (self.files) |f| f.deinit(allocator);
+        if (self.files.len > 0) allocator.free(self.files);
+        allocator.free(self.sig);
+    }
+};
+
+pub fn freeManifests(allocator: Allocator, manifests: []Manifest) void {
+    for (manifests) |m| m.deinit(allocator);
+    allocator.free(manifests);
+}
+
+/// InventoriesEqual reports whether two complete `files` inventories describe
+/// the same snapshot: identical sorted path sets with equal blob ids, sizes,
+/// modes, and reasons.
+pub fn inventoriesEqual(a: []const ManifestEntry, b: []const ManifestEntry) bool {
+    if (a.len != b.len) return false;
+    for (a, b) |ea, eb| {
+        if (!std.mem.eql(u8, ea.path, eb.path) or
+            !std.mem.eql(u8, ea.blob, eb.blob) or
+            ea.bytes != eb.bytes or
+            ea.mode != eb.mode or
+            !std.mem.eql(u8, ea.reason, eb.reason))
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
 // Store path helpers matching Go's `store.go`
 
 pub fn streamsDir(allocator: Allocator, root: []const u8) ![]u8 {
@@ -423,6 +498,26 @@ pub fn keysDir(allocator: Allocator, root: []const u8) ![]u8 {
 
 pub fn keyFilePath(allocator: Allocator, root: []const u8, name: []const u8) ![]u8 {
     return std.fmt.allocPrint(allocator, "{s}/keys/{s}", .{ fsys.cleanMemPath(root), name });
+}
+
+pub fn manifestsDir(allocator: Allocator, root: []const u8) ![]u8 {
+    return std.fmt.allocPrint(allocator, "{s}/manifests", .{fsys.cleanMemPath(root)});
+}
+
+pub fn manifestLogPath(allocator: Allocator, root: []const u8, stream_id: []const u8) ![]u8 {
+    return std.fmt.allocPrint(allocator, "{s}/manifests/{s}.jsonl", .{ fsys.cleanMemPath(root), stream_id });
+}
+
+/// BlobPath resolves `<store>/blobs/<2 hex>/<62 hex>` for a lowercase hex
+/// content id. Non-hex-shaped ids are refused `blob_malformed` rather than
+/// producing a path — a bad id is corrupt manifest data, never a filename.
+pub fn blobPath(allocator: Allocator, root: []const u8, hex_id: []const u8) ![]u8 {
+    if (hex_id.len != 64) return fsys.refuse("blob_malformed", hex_id);
+    for (hex_id) |c| {
+        const ok = (c >= '0' and c <= '9') or (c >= 'a' and c <= 'f');
+        if (!ok) return fsys.refuse("blob_malformed", hex_id);
+    }
+    return std.fmt.allocPrint(allocator, "{s}/blobs/{s}/{s}", .{ fsys.cleanMemPath(root), hex_id[0..2], hex_id[2..] });
 }
 
 /// ReadJSONLLinesWithCode splits a JSONL payload into lines and enforces the ADR 0049
@@ -1082,6 +1177,98 @@ pub fn appendStreamChange(
 
     try writeStreamRecord(allocator, fs, root, st);
     return st;
+}
+
+/// ReadManifestLines splits a manifest log payload: a torn final line refuses
+/// `manifest_torn` (per docs/flint-blobs-spec.md §1 — NOT `stream_torn`), and
+/// an empty interior line or unparseable manifest is the same refusal.
+pub fn readManifestLines(allocator: Allocator, data: []const u8) ![]const []const u8 {
+    if (data.len == 0) return &.{};
+    if (data[data.len - 1] != '\n') {
+        return fsys.refuse("manifest_torn", "");
+    }
+    const trimmed = data[0 .. data.len - 1];
+    var out: std.ArrayList([]const u8) = .empty;
+    errdefer out.deinit(allocator);
+
+    var it = std.mem.splitScalar(u8, trimmed, '\n');
+    while (it.next()) |line| {
+        if (line.len == 0) {
+            return fsys.refuse("manifest_torn", "");
+        }
+        try out.append(allocator, line);
+    }
+    return out.toOwnedSlice(allocator);
+}
+
+/// LoadManifests reads `manifests/<stream-id>.jsonl` (absent → empty slice) and
+/// parses each signed line. The log bound shadows the Change bound.
+pub fn loadManifests(allocator: Allocator, fs: FS, root: []const u8, stream_id: []const u8) ![]Manifest {
+    const p = try manifestLogPath(allocator, root, stream_id);
+    defer allocator.free(p);
+    if (!fs.exists(allocator, p)) {
+        return try allocator.alloc(Manifest, 0);
+    }
+    const b = try fs.readFile(allocator, p, MaxFileReadBytes);
+    defer allocator.free(b);
+
+    const lines = try readManifestLines(allocator, b);
+    defer allocator.free(lines);
+
+    if (lines.len > MaxManifests) {
+        return fsys.refuse("store_too_large", "manifests");
+    }
+
+    var manifests: std.ArrayList(Manifest) = .empty;
+    errdefer {
+        for (manifests.items) |m| m.deinit(allocator);
+        manifests.deinit(allocator);
+    }
+
+    for (lines) |line| {
+        const m = json.parseManifest(allocator, line) catch {
+            return fsys.refuse("manifest_torn", "");
+        };
+        errdefer m.deinit(allocator);
+        try manifests.append(allocator, m);
+    }
+    return manifests.toOwnedSlice(allocator);
+}
+
+/// ValidManifestPath enforces the §2 normalized relative path rule: `/`
+/// separators, non-empty segments, no `.`/`..`, no absolute spelling. Capture
+/// never produces anything else; a violation on read is `manifest_torn`.
+pub fn validManifestPath(p: []const u8) bool {
+    if (p.len == 0 or p[0] == '/') return false;
+    var it = std.mem.splitScalar(u8, p, '/');
+    while (it.next()) |seg| {
+        if (seg.len == 0 or std.mem.eql(u8, seg, ".") or std.mem.eql(u8, seg, "..")) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/// ManifestForChange finds the manifest line binding `change_id`, or null when
+/// the revision is content-less (pre-blobs store, crashed commit).
+pub fn manifestForChange(manifests: []const Manifest, change_id: []const u8) ?*const Manifest {
+    for (manifests) |*m| {
+        if (std.mem.eql(u8, m.change, change_id)) return m;
+    }
+    return null;
+}
+
+/// AppendManifest appends step (3) of the extended commit order: the signed
+/// manifest line with `appendSync`, enforcing the 4 MiB line bound.
+pub fn appendManifest(allocator: Allocator, fs: FS, root: []const u8, m: Manifest) !void {
+    const line = try json.marshalManifestLine(allocator, m);
+    defer allocator.free(line);
+    if (line.len > MaxFileReadBytes) {
+        return fsys.refuse("store_too_large", "manifest");
+    }
+    const log_path = try manifestLogPath(allocator, root, m.stream);
+    defer allocator.free(log_path);
+    try fs.appendSync(allocator, log_path, line);
 }
 
 pub fn validWorkspaceName(name: []const u8) bool {

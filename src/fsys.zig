@@ -79,10 +79,39 @@ pub fn clearErrContext() void {
     err_context = null;
 }
 
+/// EntryKind classifies a directory entry or stat result for the content
+/// layer: regular files are tracked, directories are walked, links and any
+/// other non-regular entries are recorded but never followed.
+pub const EntryKind = enum { file, dir, link, other };
+
 pub const DirEntry = struct {
     name: []const u8,
     is_dir: bool,
+    kind: EntryKind = .file,
 };
+
+pub const Stat = struct {
+    kind: EntryKind,
+    mode: u32,
+    size: u64,
+};
+
+pub fn entryKindFromIo(k: Io.File.Kind) EntryKind {
+    return switch (k) {
+        .file => .file,
+        .directory => .dir,
+        .sym_link => .link,
+        else => .other,
+    };
+}
+
+/// Permissions bits (0o777 mask) where the platform exposes them, else 0.
+pub fn permissionsMode(p: Io.File.Permissions) u32 {
+    if (@hasDecl(Io.File.Permissions, "toMode")) {
+        return @as(u32, @intCast(p.toMode() & 0o777));
+    }
+    return 0;
+}
 
 pub const FS = struct {
     ptr: *anyopaque,
@@ -98,6 +127,8 @@ pub const FS = struct {
         remove: *const fn (ptr: *anyopaque, allocator: Allocator, path: []const u8) anyerror!void,
         exists: *const fn (ptr: *anyopaque, allocator: Allocator, path: []const u8) bool,
         isDir: *const fn (ptr: *anyopaque, allocator: Allocator, path: []const u8) bool,
+        stat: *const fn (ptr: *anyopaque, allocator: Allocator, path: []const u8) anyerror!Stat,
+        setMode: *const fn (ptr: *anyopaque, path: []const u8, mode: u32) anyerror!void,
     };
 
     pub fn readFile(self: FS, allocator: Allocator, path: []const u8, max_bytes: usize) ![]u8 {
@@ -135,6 +166,18 @@ pub const FS = struct {
 
     pub fn isDir(self: FS, allocator: Allocator, path: []const u8) bool {
         return self.vtable.isDir(self.ptr, allocator, path);
+    }
+
+    /// Lstat-style metadata: the final path component is never followed
+    /// through a symlink, so callers can classify links safely.
+    pub fn stat(self: FS, allocator: Allocator, path: []const u8) !Stat {
+        return self.vtable.stat(self.ptr, allocator, path);
+    }
+
+    /// Applies POSIX permission bits (masked to 0o777); a no-op where the
+    /// platform does not expose mode bits.
+    pub fn setMode(self: FS, path: []const u8, mode: u32) !void {
+        return self.vtable.setMode(self.ptr, path, mode);
     }
 
     pub fn freeDirEntries(allocator: Allocator, entries: []DirEntry) void {
@@ -266,6 +309,8 @@ pub const HostFS = struct {
                 .remove = removeImpl,
                 .exists = existsImpl,
                 .isDir = isDirImpl,
+                .stat = statImpl,
+                .setMode = setModeImpl,
             },
         };
     }
@@ -391,6 +436,7 @@ pub const HostFS = struct {
             try list_out.append(allocator, .{
                 .name = name_copy,
                 .is_dir = entry.kind == .directory,
+                .kind = entryKindFromIo(entry.kind),
             });
         }
 
@@ -418,6 +464,25 @@ pub const HostFS = struct {
         const st = Io.Dir.statFile(.cwd(), self.io, path, .{}) catch return false;
         return st.kind == .directory;
     }
+
+    fn statImpl(ptr: *anyopaque, allocator: Allocator, path: []const u8) anyerror!Stat {
+        _ = allocator;
+        const self: *HostFS = @ptrCast(@alignCast(ptr));
+        const st = try Io.Dir.statFile(.cwd(), self.io, path, .{ .follow_symlinks = false });
+        return .{
+            .kind = entryKindFromIo(st.kind),
+            .mode = permissionsMode(st.permissions),
+            .size = st.size,
+        };
+    }
+
+    fn setModeImpl(ptr: *anyopaque, path: []const u8, mode: u32) anyerror!void {
+        const self: *HostFS = @ptrCast(@alignCast(ptr));
+        if (@hasDecl(Io.File.Permissions, "fromMode")) {
+            const perms = Io.File.Permissions.fromMode(@intCast(mode & 0o777));
+            try Io.Dir.setFilePermissions(.cwd(), self.io, path, perms, .{});
+        }
+    }
 };
 
 /// In-memory filesystem for deterministic unit and conformance tests,
@@ -427,6 +492,7 @@ pub const MemFS = struct {
     files: std.StringHashMap([]u8),
     dirs: std.StringHashMap(void),
     modes: std.StringHashMap(u32),
+    links: std.StringHashMap([]u8),
     before_write_ctx: ?*anyopaque = null,
     before_write: ?*const fn (ctx: ?*anyopaque, op: []const u8, path: []const u8) anyerror!void = null,
 
@@ -436,6 +502,7 @@ pub const MemFS = struct {
             .files = std.StringHashMap([]u8).init(allocator),
             .dirs = std.StringHashMap(void).init(allocator),
             .modes = std.StringHashMap(u32).init(allocator),
+            .links = std.StringHashMap([]u8).init(allocator),
         };
         try self.putDir("/host");
         return self;
@@ -460,6 +527,13 @@ pub const MemFS = struct {
             self.allocator.free(kv.key_ptr.*);
         }
         self.modes.deinit();
+
+        var lit = self.links.iterator();
+        while (lit.next()) |kv| {
+            self.allocator.free(kv.key_ptr.*);
+            self.allocator.free(kv.value_ptr.*);
+        }
+        self.links.deinit();
     }
 
     pub fn fs(self: *MemFS) FS {
@@ -475,12 +549,26 @@ pub const MemFS = struct {
                 .remove = removeImpl,
                 .exists = existsImpl,
                 .isDir = isDirImpl,
+                .stat = statImpl,
+                .setMode = setModeImpl,
             },
         };
     }
 
     pub fn getMode(self: *const MemFS, path: []const u8) ?u32 {
         return self.modes.get(cleanMemPath(path));
+    }
+
+    /// Adds a symlink entry at `path` pointing at `target` for tests that need
+    /// non-regular directory entries. Links are classified, never resolved.
+    pub fn addSymlink(self: *MemFS, path: []const u8, target: []const u8) !void {
+        const p = cleanMemPath(path);
+        try self.markParents(p);
+        const k = try self.allocator.dupe(u8, p);
+        errdefer self.allocator.free(k);
+        const v = try self.allocator.dupe(u8, target);
+        errdefer self.allocator.free(v);
+        try self.links.put(k, v);
     }
 
     fn putDir(self: *MemFS, p: []const u8) !void {
@@ -620,7 +708,7 @@ pub const MemFS = struct {
             try std.fmt.allocPrint(allocator, "{s}/", .{dir});
         defer allocator.free(prefix);
 
-        var children = std.StringHashMap(bool).init(allocator);
+        var children = std.StringHashMap(EntryKind).init(allocator);
         defer children.deinit();
 
         var found_dir = self.dirs.contains(dir);
@@ -633,7 +721,7 @@ pub const MemFS = struct {
                 const rest = p[prefix.len..];
                 if (rest.len == 0) continue;
                 const child_name = if (std.mem.indexOfScalar(u8, rest, '/')) |i| rest[0..i] else rest;
-                try children.put(child_name, true);
+                try children.put(child_name, .dir);
             }
         }
 
@@ -645,9 +733,23 @@ pub const MemFS = struct {
                 const rest = p[prefix.len..];
                 if (rest.len == 0) continue;
                 if (std.mem.indexOfScalar(u8, rest, '/')) |i| {
-                    try children.put(rest[0..i], true);
+                    try children.put(rest[0..i], .dir);
                 } else if (!children.contains(rest)) {
-                    try children.put(rest, false);
+                    try children.put(rest, .file);
+                }
+            }
+        }
+
+        var lit = self.links.iterator();
+        while (lit.next()) |kv| {
+            const p = kv.key_ptr.*;
+            if (std.mem.startsWith(u8, p, prefix)) {
+                found_dir = true;
+                const rest = p[prefix.len..];
+                if (rest.len == 0) continue;
+                const child_name = if (std.mem.indexOfScalar(u8, rest, '/')) |i| rest[0..i] else rest;
+                if (std.mem.indexOfScalar(u8, rest, '/') == null and !children.contains(child_name)) {
+                    try children.put(child_name, .link);
                 }
             }
         }
@@ -666,7 +768,8 @@ pub const MemFS = struct {
             errdefer allocator.free(name_copy);
             try out.append(allocator, .{
                 .name = name_copy,
-                .is_dir = kv.value_ptr.*,
+                .is_dir = kv.value_ptr.* == .dir,
+                .kind = kv.value_ptr.*,
             });
         }
 
@@ -681,6 +784,11 @@ pub const MemFS = struct {
         const p = cleanMemPath(path);
         if (self.before_write) |hook| {
             try hook(self.before_write_ctx, "remove", p);
+        }
+        if (self.links.fetchRemove(p)) |lkv| {
+            self.allocator.free(lkv.key);
+            self.allocator.free(lkv.value);
+            return;
         }
         if (self.files.fetchRemove(p)) |kv| {
             self.allocator.free(kv.key);
@@ -700,7 +808,7 @@ pub const MemFS = struct {
     fn existsImpl(ptr: *anyopaque, allocator: Allocator, path: []const u8) bool {
         const self: *MemFS = @ptrCast(@alignCast(ptr));
         const p = cleanMemPath(path);
-        if (self.files.contains(p) or self.dirs.contains(p)) return true;
+        if (self.files.contains(p) or self.dirs.contains(p) or self.links.contains(p)) return true;
         const prefix = std.fmt.allocPrint(allocator, "{s}/", .{p}) catch return false;
         defer allocator.free(prefix);
 
@@ -732,5 +840,31 @@ pub const MemFS = struct {
             if (std.mem.startsWith(u8, kv.key_ptr.*, prefix)) return true;
         }
         return false;
+    }
+
+    fn statImpl(ptr: *anyopaque, allocator: Allocator, path: []const u8) anyerror!Stat {
+        const self: *MemFS = @ptrCast(@alignCast(ptr));
+        const p = cleanMemPath(path);
+        if (self.files.get(p)) |data| {
+            return .{
+                .kind = .file,
+                .mode = self.modes.get(p) orelse 0o644,
+                .size = data.len,
+            };
+        }
+        if (self.links.get(p)) |target| {
+            return .{ .kind = .link, .mode = 0o777, .size = target.len };
+        }
+        if (isDirImpl(ptr, allocator, p)) {
+            return .{ .kind = .dir, .mode = 0o755, .size = 0 };
+        }
+        return error.FileNotFound;
+    }
+
+    fn setModeImpl(ptr: *anyopaque, path: []const u8, mode: u32) anyerror!void {
+        const self: *MemFS = @ptrCast(@alignCast(ptr));
+        const p = cleanMemPath(path);
+        if (!self.files.contains(p)) return error.FileNotFound;
+        try self.putMode(p, mode & 0o777);
     }
 };

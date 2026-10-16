@@ -6,6 +6,8 @@ const FS = fsys.FS;
 const store = @import("store.zig");
 const uuid = @import("uuid.zig");
 const ed25519 = @import("ed25519.zig");
+const json = @import("json.zig");
+const content = @import("content.zig");
 
 pub const loadSigningSeed = ed25519.loadSigningSeed;
 pub const signChangeWithSeed = ed25519.signChangeWithSeed;
@@ -35,6 +37,7 @@ pub fn cmdCommit(
     allocator: Allocator,
     fs: FS,
     root: []const u8,
+    cwd: []const u8,
     uuid_gen: *uuid.UUIDGen,
     env_sign_key: ?[]const u8,
     out: *Io.Writer,
@@ -89,9 +92,6 @@ pub fn cmdCommit(
     const stage = try store.loadWorkspaceStage(allocator, fs, root, ws.name);
     defer store.freeOps(allocator, stage);
 
-    if (stage.len == 0) {
-        return fsys.refuse("nothing_to_commit", "");
-    }
     if (idx.change_count + 1 > store.MaxChanges) {
         return fsys.refuse("store_too_large", "changes");
     }
@@ -113,6 +113,29 @@ pub fn cmdCommit(
 
     const expected_head = loaded.stream.head;
 
+    // B1 (docs/flint-blobs-spec.md §3): capture the complete source inventory
+    // — hashing the tracked tree is read-only, so it stays inside the
+    // "no writes before the key is loaded" discipline.
+    const cap = try content.captureSnapshot(allocator, fs, cwd, root, ws.src);
+    defer cap.deinit(allocator);
+
+    const manifests = try store.loadManifests(allocator, fs, root, loaded.stream.id);
+    defer store.freeManifests(allocator, manifests);
+
+    const parent_manifest = if (expected_head) |h|
+        store.manifestForChange(manifests, h)
+    else
+        null;
+    // A missing parent manifest means "everything differs" (§3). A head-less
+    // stream has no parent snapshot at all, so an empty stage still refuses
+    // `nothing_to_commit` — the same shape pre-content stores produced.
+    const content_differs = expected_head != null and
+        (parent_manifest == null or !store.inventoriesEqual(parent_manifest.?.files, cap.entries));
+
+    if (stage.len == 0 and !content_differs) {
+        return fsys.refuse("nothing_to_commit", "");
+    }
+
     // Staging-base guard (#67): STAGE.jsonl was diffed against the stream head
     // `add` recorded in ws/<ws>/BASE.json. A pull, pull --reset, or another
     // workspace's commit can move the head afterwards; committing would
@@ -121,20 +144,24 @@ pub fn cmdCommit(
     // documented explicit restage; there is no bypass flag. A stage without
     // BASE.json (written before this guard existed) has unknown provenance and
     // refuses the same way rather than silently assuming the latest head.
-    const stage_base = try store.loadWorkspaceStageBase(allocator, fs, root, ws.name);
-    defer if (stage_base) |sb| sb.deinit(allocator);
-    if (stage_base) |sb| {
-        if (!store.optStrEql(sb.head, expected_head)) {
-            const detail = try std.fmt.allocPrint(
-                allocator,
-                "staged against {s}; stream head is now {s}; re-run add to restage",
-                .{ sb.head orelse "none", expected_head orelse "none" },
-            );
-            defer allocator.free(detail);
-            return fsys.refuse("stage_stale", detail);
+    // The guard applies to staged intent only: a pure content-only commit
+    // (empty stage, differing inventory) asserts no Op base at all.
+    if (stage.len > 0) {
+        const stage_base = try store.loadWorkspaceStageBase(allocator, fs, root, ws.name);
+        defer if (stage_base) |sb| sb.deinit(allocator);
+        if (stage_base) |sb| {
+            if (!store.optStrEql(sb.head, expected_head)) {
+                const detail = try std.fmt.allocPrint(
+                    allocator,
+                    "staged against {s}; stream head is now {s}; re-run add to restage",
+                    .{ sb.head orelse "none", expected_head orelse "none" },
+                );
+                defer allocator.free(detail);
+                return fsys.refuse("stage_stale", detail);
+            }
+        } else {
+            return fsys.refuse("stage_stale", "stage base unknown; re-run add to restage");
         }
-    } else {
-        return fsys.refuse("stage_stale", "stage base unknown; re-run add to restage");
     }
 
     const ts = try uuid_gen.nowMs();
@@ -156,20 +183,53 @@ pub fn cmdCommit(
         if (c.sig.len > 0) allocator.free(c.sig);
     }
 
+    // §7 merge-content rule: while any `origin = "merge"` atom remains in the
+    // workspace table, src does not honestly describe the merged semantic
+    // state — the Change still lands but no manifest advertises it, so
+    // `checkout` of this revision refuses `blob_missing` instead of serving
+    // substituted bytes.
+    const ws_atoms = try store.loadWorkspaceAtoms(allocator, fs, root, ws.name);
+    defer store.freeStoredAtoms(allocator, ws_atoms);
+    const write_manifest = !content.hasUnmaterializedMergeMarks(ws_atoms);
+
+    var manifest: ?store.Manifest = null;
+    defer if (manifest) |*mm| mm.deinit(allocator);
+    if (write_manifest) {
+        if (manifests.len + 1 > store.MaxManifests) {
+            return fsys.refuse("store_too_large", "manifests");
+        }
+        manifest = try content.signSnapshot(allocator, loaded.stream.id, &change_id, seed, cap.entries);
+        const mline = try json.marshalManifestLine(allocator, manifest.?);
+        defer allocator.free(mline);
+        if (mline.len > store.MaxFileReadBytes) {
+            return fsys.refuse("store_too_large", "manifest");
+        }
+    }
+
     try ed25519.signChangeWithSeed(allocator, &c, &seed);
 
     if (before_commit_append) |hook| {
         hook(before_commit_append_ctx);
     }
 
-    // Commit order: (1) append Change + FileSync, (2) rewrite Stream record,
-    // (3) remove STAGE.jsonl.
+    // Commit order (docs/flint-blobs-spec.md §1): (1) append Change + fsync,
+    // (2) rewrite Stream record, (3) append signed manifest + fsync after the
+    // blobs it references, (4) remove STAGE.jsonl. A crash before (3) leaves
+    // a valid store whose newest Change is simply content-less.
     var updated_st = try store.appendStreamChange(allocator, fs, root, loaded.stream.id, expected_head, c);
     updated_st.deinit(allocator);
 
+    if (manifest) |mm| {
+        try content.writePendingBlobs(allocator, fs, cwd, root, cap.pending);
+        try store.appendManifest(allocator, fs, root, mm);
+    }
+
     const stage_path = try store.workspaceStagePath(allocator, root, ws.name);
     defer allocator.free(stage_path);
-    try fs.remove(allocator, stage_path);
+    // A content-only commit may hold no staged intent file at all.
+    if (fs.exists(allocator, stage_path)) {
+        try fs.remove(allocator, stage_path);
+    }
 
     const base_path = try store.workspaceBasePath(allocator, root, ws.name);
     defer allocator.free(base_path);

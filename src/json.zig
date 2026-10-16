@@ -300,6 +300,68 @@ pub fn marshalStageBaseLine(allocator: Allocator, head: ?[]const u8) ![]u8 {
     return out.toOwnedSlice(allocator);
 }
 
+/// Appends one `files` entry of a snapshot manifest in field order:
+/// `path`, `blob` (nullable — `"blob":null` marks an explicitly incomplete
+/// entry), `bytes`, `mode`, `reason` (present only on null-blob entries).
+pub fn appendManifestEntry(out: *std.ArrayList(u8), allocator: Allocator, e: store.ManifestEntry) !void {
+    try out.appendSlice(allocator, "{\"path\":");
+    try appendGoJSONString(out, allocator, e.path);
+    try out.appendSlice(allocator, ",\"blob\":");
+    if (e.blob.len == 0) {
+        try out.appendSlice(allocator, "null");
+    } else {
+        try appendGoJSONString(out, allocator, e.blob);
+    }
+    try out.appendSlice(allocator, ",\"bytes\":");
+    try appendInt64(out, allocator, @intCast(e.bytes));
+    try out.appendSlice(allocator, ",\"mode\":");
+    try appendInt64(out, allocator, e.mode);
+    if (e.reason.len > 0) {
+        try out.appendSlice(allocator, ",\"reason\":");
+        try appendGoJSONString(out, allocator, e.reason);
+    }
+    try out.append(allocator, '}');
+}
+
+fn manifestEntryLessThan(_: void, a: store.ManifestEntry, b: store.ManifestEntry) bool {
+    return std.mem.lessThan(u8, a.path, b.path);
+}
+
+/// Appends the canonical manifest object — `stream`, `change`, `author`,
+/// `files` sorted by path — WITHOUT `sig`: this is the `flint-manifest-v1`
+/// signature preimage (docs/flint-blobs-spec.md §5).
+pub fn appendManifestBody(out: *std.ArrayList(u8), allocator: Allocator, m: store.Manifest) !void {
+    const sorted = try allocator.dupe(store.ManifestEntry, m.files);
+    defer allocator.free(sorted);
+    std.mem.sort(store.ManifestEntry, sorted, {}, manifestEntryLessThan);
+
+    try out.appendSlice(allocator, "{\"stream\":");
+    try appendGoJSONString(out, allocator, m.stream);
+    try out.appendSlice(allocator, ",\"change\":");
+    try appendGoJSONString(out, allocator, m.change);
+    try out.appendSlice(allocator, ",\"author\":");
+    try appendGoJSONString(out, allocator, m.author);
+    try out.appendSlice(allocator, ",\"files\":[");
+    for (sorted, 0..) |e, idx| {
+        if (idx > 0) try out.append(allocator, ',');
+        try appendManifestEntry(out, allocator, e);
+    }
+    try out.appendSlice(allocator, "]}");
+}
+
+/// Serializes a signed manifest as a single JSON line with trailing `\n`
+/// in field order: `stream`, `change`, `author`, `files`, `sig`.
+pub fn marshalManifestLine(allocator: Allocator, m: store.Manifest) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    try appendManifestBody(&out, allocator, m);
+    _ = out.pop();
+    try out.appendSlice(allocator, ",\"sig\":");
+    try appendGoJSONString(&out, allocator, m.sig);
+    try out.appendSlice(allocator, "}\n");
+    return out.toOwnedSlice(allocator);
+}
+
 /// Serializes `RemoteConfig` as a single JSON line with trailing `\n`
 /// in field order: `remote`, `stream`.
 pub fn marshalRemoteConfigLine(allocator: Allocator, rc: store.RemoteConfig) ![]u8 {
@@ -680,6 +742,88 @@ pub fn parseMergeReport(allocator: Allocator, data: []const u8) !store.MergeRepo
         }
     }
     return .{ .into = into, .from = from, .ancestor = ancestor, .conflicts = try conflicts.toOwnedSlice(allocator) };
+}
+
+/// Unmarshals a single signed manifest line. Field/type failures and
+/// contract violations (bad path spellings, malformed blob ids, missing
+/// fields, or a null blob without a `reason`) return an error; callers map
+/// it to `manifest_torn`.
+pub fn parseManifest(allocator: Allocator, line: []const u8) !store.Manifest {
+    if (std.mem.trim(u8, line, " \t\r\n").len == 0) {
+        return error.InvalidJsonField;
+    }
+    const parsed = std.json.parseFromSlice(std.json.Value, allocator, line, .{}) catch {
+        return error.InvalidJsonField;
+    };
+    defer parsed.deinit();
+    if (parsed.value != .object) return error.InvalidJsonField;
+    const obj = parsed.value.object;
+
+    const stream = try getOptStrDupe(allocator, obj, "stream");
+    errdefer allocator.free(stream);
+    const change = try getOptStrDupe(allocator, obj, "change");
+    errdefer allocator.free(change);
+    const author = try getOptStrDupe(allocator, obj, "author");
+    errdefer allocator.free(author);
+    const sig = try getOptStrDupe(allocator, obj, "sig");
+    errdefer allocator.free(sig);
+    if (stream.len == 0 or change.len == 0 or author.len == 0 or sig.len == 0) {
+        return error.InvalidJsonField;
+    }
+
+    const files_val = obj.get("files") orelse return error.InvalidJsonField;
+    if (files_val != .array) return error.InvalidJsonField;
+
+    var files = try allocator.alloc(store.ManifestEntry, files_val.array.items.len);
+    var fi: usize = 0;
+    errdefer {
+        for (files[0..fi]) |f| f.deinit(allocator);
+        allocator.free(files);
+    }
+    for (files_val.array.items) |item| {
+        if (item != .object) return error.InvalidJsonField;
+        const fo = item.object;
+        const path = try getOptStrDupe(allocator, fo, "path");
+        errdefer allocator.free(path);
+        if (!store.validManifestPath(path)) return error.InvalidJsonField;
+
+        const blob = try getOptStrDupe(allocator, fo, "blob");
+        errdefer if (blob.len > 0) allocator.free(blob);
+        if (blob.len > 0) {
+            if (ed25519.parseHex32Lower(blob) == null) return error.InvalidJsonField;
+        }
+
+        const reason = try getOptStrDupe(allocator, fo, "reason");
+        errdefer if (reason.len > 0) allocator.free(reason);
+        const reason_ok = reason.len == 0 or
+            std.mem.eql(u8, reason, "too_large") or
+            std.mem.eql(u8, reason, "unsupported");
+        if (!reason_ok) return error.InvalidJsonField;
+        // A null blob must carry a reason; a present blob must not.
+        if ((blob.len == 0) != (reason.len > 0)) return error.InvalidJsonField;
+
+        const bytes_i = getInt64Default(fo, "bytes") catch return error.InvalidJsonField;
+        if (bytes_i < 0) return error.InvalidJsonField;
+        const mode_i = getInt64Default(fo, "mode") catch return error.InvalidJsonField;
+        if (mode_i < 0 or mode_i > std.math.maxInt(u32)) return error.InvalidJsonField;
+
+        files[fi] = .{
+            .path = path,
+            .blob = blob,
+            .bytes = @intCast(bytes_i),
+            .mode = @intCast(mode_i),
+            .reason = reason,
+        };
+        fi += 1;
+    }
+
+    return .{
+        .stream = stream,
+        .change = change,
+        .author = author,
+        .files = files,
+        .sig = sig,
+    };
 }
 
 test "Go JSON HTML escaping and Change roundtrip" {

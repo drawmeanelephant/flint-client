@@ -242,7 +242,7 @@ pub fn cmdRelease(
         try commit_args.append(allocator, key_arg.?);
     }
 
-    try sign.cmdCommit(allocator, fs, root, uuid_gen, env_sign_key, out, commit_args.items);
+    try sign.cmdCommit(allocator, fs, root, cwd, uuid_gen, env_sign_key, out, commit_args.items);
 
     try out.print("flint: release ok name={s} version={s} sha256={s}\n", .{ name, version, &elf_hex });
 }
