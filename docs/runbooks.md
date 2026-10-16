@@ -22,6 +22,11 @@ contain private keys: never attach them to issues or upload them.
 5. Verify history again, inspect the log, then push only after reviewing the
    merge. A merge/clone changes metadata, **not source materialization**.
    Reconcile disk source before `add`; `src_behind` prevents a silent revert.
+   To hand the rescue stream to another agent, `push --stream=<rescue-name>`:
+   the preserved origin Change can never join a remote log (its `stream`
+   field is inside the signed preimage), so push re-anchors the fork record
+   to the merge that incorporated it — the merge's signed `merged` link keeps
+   the original Change id for attribution.
 
 Success: expected heads/ancestry, valid signatures, no missing local history.
 The regression test filter `re-clone never overwrites` exercises this recovery.

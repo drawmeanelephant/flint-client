@@ -67,6 +67,7 @@ flowchart LR
   src_sync_zig["src/sync.zig"] --> src_store_zig["src/store.zig"]
   src_sync_zig["src/sync.zig"] --> src_uuid_zig["src/uuid.zig"]
   src_sync_scenarios_test_zig["src/sync_scenarios_test.zig"] --> src_fsys_zig["src/fsys.zig"]
+  src_sync_scenarios_test_zig["src/sync_scenarios_test.zig"] --> src_json_zig["src/json.zig"]
   src_sync_scenarios_test_zig["src/sync_scenarios_test.zig"] --> src_main_zig["src/main.zig"]
   src_sync_scenarios_test_zig["src/sync_scenarios_test.zig"] --> src_store_zig["src/store.zig"]
   src_sync_scenarios_test_zig["src/sync_scenarios_test.zig"] --> src_sync_zig["src/sync.zig"]

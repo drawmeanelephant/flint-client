@@ -1313,6 +1313,72 @@ fn resolveStreamAndWorkspace(
     return .{ .stream = st.*, .ws_name = ws.name };
 }
 
+/// Finds the earliest merge Change on `origin_stream_id`'s first-parent chain
+/// whose `merged` edge names `missing_id` — the merge that folded an
+/// unpublishable Change into publishable history (#65). Returns an owned copy
+/// of the merge id, or null when no merge incorporated it.
+fn findIncorporatingMerge(
+    allocator: Allocator,
+    fs: FS,
+    root: []const u8,
+    origin_stream_id: []const u8,
+    missing_id: []const u8,
+) !?[]u8 {
+    var origin = try store.loadStream(allocator, fs, root, origin_stream_id);
+    defer origin.deinit(allocator);
+
+    var by_id = std.StringHashMap(store.Change).init(allocator);
+    defer by_id.deinit();
+    for (origin.changes) |c| try by_id.put(c.id, c);
+
+    var found: ?[]const u8 = null;
+    var cur: ?[]const u8 = origin.stream.head;
+    while (cur) |cid| {
+        const c = by_id.get(cid) orelse break;
+        if (c.merged) |m| {
+            if (std.mem.eql(u8, m, missing_id)) found = c.id;
+        }
+        cur = c.parent;
+    }
+    return if (found) |f| try allocator.dupe(u8, f) else null;
+}
+
+/// Re-anchors `st`'s `forked_from` and `head` to `new_origin_change`, a merge
+/// Change on the same origin stream that incorporated the previous origin.
+/// Rewrites `streams/<id>.json` and updates the in-memory record so the push
+/// bookkeeping sees the re-anchored head (#65). Callers must only re-anchor a
+/// bare fork pointer: a fork's own Changes chain onto the old origin and
+/// cannot move without breaking their signatures.
+fn reanchorForkRecord(
+    allocator: Allocator,
+    fs: FS,
+    root: []const u8,
+    st: *store.Stream,
+    new_origin_change: []const u8,
+) !void {
+    const ff = st.forked_from orelse return;
+    const new_head = try allocator.dupe(u8, new_origin_change);
+    errdefer allocator.free(new_head);
+    const new_ff = store.ForkOrigin{
+        .stream = try allocator.dupe(u8, ff.stream),
+        .change = try allocator.dupe(u8, new_origin_change),
+    };
+    errdefer new_ff.deinit(allocator);
+
+    try store.writeStreamRecord(allocator, fs, root, .{
+        .id = st.id,
+        .name = st.name,
+        .head = new_head,
+        .created = st.created,
+        .forked_from = new_ff,
+    });
+
+    if (st.head) |h| allocator.free(h);
+    st.head = new_head;
+    if (st.forked_from) |old| old.deinit(allocator);
+    st.forked_from = new_ff;
+}
+
 fn pushSingleStream(
     allocator: Allocator,
     fs: FS,
@@ -1329,19 +1395,50 @@ fn pushSingleStream(
 
     var was_created = false;
     var remote_head: ?[]const u8 = null;
+    var remote_head_owned: ?[]u8 = null;
+    defer if (remote_head_owned) |h| allocator.free(h);
 
     if (server_heads.get(st_id)) |rh_opt| {
         remote_head = rh_opt;
     } else {
-        const init_head: ?[]const u8 = if (loaded.stream.forked_from) |ff| ff.change else null;
-        const init_rec = store.Stream{
+        var init_head: ?[]const u8 = if (loaded.stream.forked_from) |ff| ff.change else null;
+        var init_rec = store.Stream{
             .id = loaded.stream.id,
             .name = loaded.stream.name,
             .head = init_head,
             .forked_from = loaded.stream.forked_from,
             .created = loaded.stream.created,
         };
-        try client.create(init_rec);
+        client.create(init_rec) catch |cerr| {
+            if (cerr != error.Refuse or
+                !std.mem.eql(u8, fsys.last_refuse.code(), "change_missing"))
+            {
+                return cerr;
+            }
+            const ff = loaded.stream.forked_from orelse return cerr;
+            if (loaded.changes.len != 0 or
+                !store.optStrEql(loaded.stream.head, ff.change)) return cerr;
+            // The fork origin exists only as an unreachable sibling line
+            // (e.g. preserved by `pull --reset`); it can never join a remote
+            // log — `stream` sits inside the signed preimage and `append`
+            // only takes first-parent extensions of the remote head. When the
+            // origin stream's first-parent chain holds the merge Change that
+            // incorporated it, re-anchor the fork record to that merge so the
+            // preserved line stays publishable through the merge's signed
+            // `merged` link (#65).
+            const mc = (try findIncorporatingMerge(allocator, fs, root, ff.stream, ff.change)) orelse return cerr;
+            remote_head_owned = mc;
+            init_head = mc;
+            try reanchorForkRecord(allocator, fs, root, &loaded.stream, mc);
+            init_rec = store.Stream{
+                .id = loaded.stream.id,
+                .name = loaded.stream.name,
+                .head = init_head,
+                .forked_from = loaded.stream.forked_from,
+                .created = loaded.stream.created,
+            };
+            try client.create(init_rec);
+        };
         was_created = true;
         remote_head = init_head;
 
@@ -1364,6 +1461,23 @@ fn pushSingleStream(
         return .{ .sent_changes = 0, .was_created = was_created };
     }
 
+    // A bare fork pointer whose origin was re-anchored remotely (see the
+    // create path above) converges locally when the remote head is exactly
+    // the merge Change that incorporated the missing origin (#65).
+    if (remote_head) |rh| {
+        if (loaded.stream.forked_from) |ff| {
+            if (loaded.changes.len == 0 and store.optStrEql(loaded.stream.head, ff.change)) {
+                if (try findIncorporatingMerge(allocator, fs, root, ff.stream, ff.change)) |mc| {
+                    defer allocator.free(mc);
+                    if (std.mem.eql(u8, mc, rh)) {
+                        try reanchorForkRecord(allocator, fs, root, &loaded.stream, mc);
+                        return .{ .sent_changes = 0, .was_created = was_created };
+                    }
+                }
+            }
+        }
+    }
+
     if (raw_lines.len == 0) {
         // Local has 0 changes in its own log, but remote_head differs -> stale_head.
         const new_h = try client.append(st_id, local_head, &.{});
@@ -1371,56 +1485,67 @@ fn pushSingleStream(
         return .{ .sent_changes = 0, .was_created = was_created };
     }
 
-    // Find start index of unsent suffix in `loaded.changes`.
-    var start_idx: ?usize = null;
-    var expected_head: ?[]const u8 = null;
+    // The unsent suffix is the first-parent chain between the remote head and
+    // the local head, not a positional log slice: `pull --reset` leaves
+    // divergent local lines in the log as unreachable siblings, and a batch
+    // must chain off `expected_head` (#65).
+    var line_idx_by_id = std.StringHashMap(usize).init(allocator);
+    defer line_idx_by_id.deinit();
+    for (loaded.changes, 0..) |c, ci| try line_idx_by_id.put(c.id, ci);
 
-    const fork_head: ?[]const u8 = if (loaded.stream.forked_from) |ff| ff.change else null;
-    const remote_is_initial = if (remote_head == null and fork_head == null)
-        true
-    else if (remote_head != null and fork_head != null)
-        std.mem.eql(u8, remote_head.?, fork_head.?)
-    else
-        false;
+    var suffix_rev: std.ArrayList(usize) = .empty;
+    defer suffix_rev.deinit(allocator);
 
-    if (remote_is_initial) {
-        start_idx = 0;
-        expected_head = remote_head;
-    } else if (remote_head) |rh| {
-        for (loaded.changes, 0..) |c, idx_c| {
-            if (std.mem.eql(u8, c.id, rh)) {
-                start_idx = idx_c + 1;
-                expected_head = rh;
-                break;
+    const expected_head: ?[]const u8 = remote_head;
+    var reached = remote_head == null;
+    {
+        var cur: ?[]const u8 = local_head;
+        while (cur) |cid| {
+            if (remote_head) |rh| {
+                if (std.mem.eql(u8, cid, rh)) {
+                    reached = true;
+                    break;
+                }
             }
+            const li = line_idx_by_id.get(cid) orelse break;
+            try suffix_rev.append(allocator, li);
+            cur = loaded.changes[li].parent;
         }
     }
 
-    if (start_idx == null) {
-        // Remote head is not in our local history (remote moved ahead / diverged).
-        // Send the last local change with its parent as expected_head so the server
-        // rejects with `stale_head` over the wire.
-        const last_idx = raw_lines.len - 1;
-        const exp = loaded.changes[last_idx].parent;
-        const h = try client.append(st_id, exp, raw_lines[last_idx .. last_idx + 1]);
+    if (!reached) {
+        // Remote head is not on our first-parent chain (remote moved ahead /
+        // diverged). Send the chain tip with its parent as expected_head so
+        // the server rejects with `stale_head` over the wire.
+        const tip_idx = if (local_head) |lh|
+            line_idx_by_id.get(lh) orelse raw_lines.len - 1
+        else
+            raw_lines.len - 1;
+        const exp = loaded.changes[tip_idx].parent;
+        const h = try client.append(st_id, exp, raw_lines[tip_idx .. tip_idx + 1]);
         allocator.free(h);
         return fsys.refuse("stale_head", stale_head_recovery_hint);
     }
 
-    const s_idx = start_idx.?;
-    if (s_idx >= raw_lines.len) {
+    if (suffix_rev.items.len == 0) {
         // Local head is behind remote head!
         return fsys.refuse("stale_head", stale_head_recovery_hint);
+    }
+
+    const send_lines = try allocator.alloc([]const u8, suffix_rev.items.len);
+    defer allocator.free(send_lines);
+    for (suffix_rev.items, 0..) |li, si| {
+        send_lines[suffix_rev.items.len - 1 - si] = raw_lines[li];
     }
 
     var cur_expected: ?[]u8 = if (expected_head) |eh| try allocator.dupe(u8, eh) else null;
     defer if (cur_expected) |ce| allocator.free(ce);
 
     var sent: usize = 0;
-    var batch_start = s_idx;
-    while (batch_start < raw_lines.len) {
-        const batch_end = @min(batch_start + MaxBatchChanges, raw_lines.len);
-        const batch = raw_lines[batch_start..batch_end];
+    var batch_start: usize = 0;
+    while (batch_start < send_lines.len) {
+        const batch_end = @min(batch_start + MaxBatchChanges, send_lines.len);
+        const batch = send_lines[batch_start..batch_end];
         const new_head = try client.append(st_id, cur_expected, batch);
         if (cur_expected) |ce| allocator.free(ce);
         cur_expected = new_head;
