@@ -70,10 +70,10 @@ The mutating-proxy hostile-server suite uses the same `FLINTD` discovery:
 FLINTD=/path/to/flint-server/zig-out/bin/flintd python3 tools/hostile_server.py
 ```
 
-Its 43 clone/pull/push scenarios corrupt, truncate, delay, or lie in server
+Its 44 clone/pull/push scenarios corrupt, truncate, delay, or lie in server
 replies; every scenario must end in a refusal (never a crash, hang, or
 silent acceptance), and a failed clone/pull must leave the local store
-verifiable and unchanged. Expected final line: `43 scenarios, 0 failed`.
+verifiable and unchanged. Expected final line: `44 scenarios, 0 failed`.
 `tools/check.py` runs the suite through its tooling-test phase whenever a
 flintd resolves and reports an explicit skip otherwise, so a green local
 run without a server does not claim real-server coverage. CI checks out and

@@ -30,10 +30,7 @@ ENV = {k: v for k, v in os.environ.items() if not k.startswith("FLINT_")}
 
 # Scenarios that reproduce a tracked issue report KNOWN; once fixed they fail the
 # run so the marker gets removed.
-KNOWN = {
-    "clone: duplicated changes": "#99",
-    "pull: duplicated changes": "#99",
-}
+KNOWN = {}
 RESULTS = []
 
 
