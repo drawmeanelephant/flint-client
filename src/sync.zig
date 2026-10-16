@@ -11,6 +11,7 @@ const json = @import("json.zig");
 const ed25519 = @import("ed25519.zig");
 const sign = @import("sign.zig");
 const merge = @import("merge.zig");
+const report = @import("report.zig");
 
 pub const ProtoVersion = "FLINT-SYNC/1";
 
@@ -18,7 +19,7 @@ pub const ProtoVersion = "FLINT-SYNC/1";
 /// the repo-root `SPECREV` file — `tools/tests/test_specrev.py` enforces
 /// the match. Bump rules and the downstream-pinning convention live in
 /// `docs/spec-versioning.md`.
-pub const SpecRev: u32 = 3;
+pub const SpecRev: u32 = 4;
 
 pub const AuthDomain = "FLINT-SYNC-AUTH/1\x00";
 pub const DefaultReadLimit: usize = 256;
@@ -774,7 +775,31 @@ pub const SyncClient = struct {
         };
     }
 
+    /// Marks a mutating remote request as resolved for `--json` outcome
+    /// reporting: a wire refusal means the remote provably rejected it
+    /// (`remoteAttemptRefused`); success confirms it (`remoteAttemptApplied`).
+    /// A transport failure leaves the attempt pending, which marshals as
+    /// `partial`/`unknown` — never `unchanged`.
+    fn noteRemoteResult(self: *SyncClient, err: ?anyerror) void {
+        _ = self;
+        const r = report.active orelse return;
+        if (err) |e| {
+            if (e == error.Refuse) r.remoteAttemptRefused();
+        } else {
+            r.remoteAttemptApplied();
+        }
+    }
+
     pub fn create(self: *SyncClient, record: store.Stream) !void {
+        if (report.active) |r| r.remoteAttemptBegin();
+        self.createImpl(record) catch |err| {
+            self.noteRemoteResult(err);
+            return err;
+        };
+        self.noteRemoteResult(null);
+    }
+
+    fn createImpl(self: *SyncClient, record: store.Stream) !void {
         const seq = self.nextSeq();
         const rec_line = try json.marshalStreamLine(self.allocator, record);
         defer self.allocator.free(rec_line);
@@ -790,6 +815,22 @@ pub const SyncClient = struct {
     }
 
     pub fn append(
+        self: *SyncClient,
+        stream_id: []const u8,
+        expected_head: ?[]const u8,
+        raw_changes: []const []const u8,
+    ) ![]u8 {
+        if (report.active) |r| r.remoteAttemptBegin();
+        const head = self.appendImpl(stream_id, expected_head, raw_changes) catch |err| {
+            self.noteRemoteResult(err);
+            return err;
+        };
+        self.noteRemoteResult(null);
+        if (report.active) |r| r.noteRemoteSent(raw_changes.len);
+        return head;
+    }
+
+    fn appendImpl(
         self: *SyncClient,
         stream_id: []const u8,
         expected_head: ?[]const u8,
@@ -845,6 +886,21 @@ pub const SyncClient = struct {
     /// verbatim. Servers that predate the op refuse `usage`; callers fall
     /// back to the spec_rev 2 re-anchor behavior.
     pub fn deposit(
+        self: *SyncClient,
+        stream_id: []const u8,
+        raw_changes: []const []const u8,
+    ) !DepositResult {
+        if (report.active) |r| r.remoteAttemptBegin();
+        const res = self.depositImpl(stream_id, raw_changes) catch |err| {
+            self.noteRemoteResult(err);
+            return err;
+        };
+        self.noteRemoteResult(null);
+        if (report.active) |r| r.noteRemoteSent(res.stored);
+        return res;
+    }
+
+    fn depositImpl(
         self: *SyncClient,
         stream_id: []const u8,
         raw_changes: []const []const u8,
@@ -1154,6 +1210,13 @@ pub fn cmdClone(
     defer allocator.free(remote_url);
     fsys.setErrContext("clone", remote_url);
 
+    if (report.active) |r| {
+        try r.setRemoteUrl(remote_url);
+        try r.setScope(name_flag, null);
+        // Any failure after this point could not fully observe the remote.
+        r.setRemoteErrorOutcome(.unknown);
+    }
+
     var auth_key = try loadAuthKey(allocator, fs, auth_key_flag, env_auth_key);
     defer if (auth_key) |*k| @memset(k, 0);
 
@@ -1172,6 +1235,7 @@ pub fn cmdClone(
     defer client.deinit();
 
     try client.handshake(auth_key);
+    if (report.active) |r| r.setRemoteSpecRev(client.server_spec_rev);
 
     // Follow `forked_from` chain from target stream back to root ancestor.
     var chain: std.ArrayList(store.Stream) = .empty;
@@ -1332,6 +1396,7 @@ pub fn cmdClone(
     try fs.mkdir(allocator, ws_dir);
     try fs.mkdir(allocator, keys_dir);
 
+    if (report.active) |r| r.beginLocalWrites();
     for (payloads.items) |p| {
         const log_path = try store.streamLogPath(allocator, root, p.record.id);
         defer allocator.free(log_path);
@@ -1368,6 +1433,7 @@ pub fn cmdClone(
             try fs.writeFileSafe(allocator, log_path, log_buf.items);
         }
         try store.writeStreamRecord(allocator, fs, root, p.record);
+        if (report.active) |r| r.noteLocalWriteDone();
     }
 
     const final_stream = chain.items[chain.items.len - 1];
@@ -1394,6 +1460,18 @@ pub fn cmdClone(
         .stream = final_stream.id,
     };
     try store.writeWorkspaceRemote(allocator, fs, root, name_flag, remote_cfg);
+
+    if (report.active) |r| {
+        try r.setScope(name_flag, final_stream.name);
+        try r.observeRemoteHead(final_stream.head);
+        try r.observeResultHead(final_stream.head);
+        r.noteRemoteReceived(total_new_changes);
+        r.remote_outcome = if (total_new_changes > 0) .applied else .unchanged;
+        r.localApplied();
+        try r.fieldInt("replayed", replay.replayed);
+        try r.fieldInt("streams", payloads.items.len);
+        try r.fieldInt("received", total_new_changes);
+    }
 
     try stdout.print("flint: clone ok stream={s} changes={d}\n", .{ final_stream.name, replay.replayed });
 }
@@ -1484,6 +1562,7 @@ fn reanchorForkRecord(
     };
     errdefer new_ff.deinit(allocator);
 
+    if (report.active) |r| r.beginLocalWrites();
     try store.writeStreamRecord(allocator, fs, root, .{
         .id = st.id,
         .name = st.name,
@@ -1491,6 +1570,7 @@ fn reanchorForkRecord(
         .created = st.created,
         .forked_from = new_ff,
     });
+    if (report.active) |r| r.noteLocalWriteDone();
 
     if (st.head) |h| allocator.free(h);
     st.head = new_head;
@@ -1576,6 +1656,9 @@ fn depositDetachedAncestry(
         const end = @min(sent + MaxBatchChanges, lines.len);
         var res = try client.deposit(stream_id, lines[sent..end]);
         res.deinit(allocator);
+        if (report.active) |r| {
+            for (indices[sent..end]) |ci| try r.noteAffected(origin.changes[ci].id);
+        }
         sent = end;
     }
     return sent;
@@ -1603,6 +1686,8 @@ fn publishIncorporatedWork(
     defer submitted.deinit();
     var pending: std.ArrayList([]const u8) = .empty;
     defer pending.deinit(allocator);
+    var pending_ids: std.ArrayList([]const u8) = .empty;
+    defer pending_ids.deinit(allocator);
 
     for (loaded.changes) |c| {
         const m = c.merged orelse continue;
@@ -1614,6 +1699,7 @@ fn publishIncorporatedWork(
             if (submitted.contains(cid)) continue;
             try submitted.put(cid, {});
             try pending.append(allocator, raw_lines[ci]);
+            try pending_ids.append(allocator, cid);
         }
     }
 
@@ -1628,6 +1714,9 @@ fn publishIncorporatedWork(
             return err;
         };
         res.deinit(allocator);
+        if (report.active) |r| {
+            for (pending_ids.items[sent..end]) |cid| try r.noteAffected(cid);
+        }
         sent = end;
     }
 }
@@ -1716,6 +1805,7 @@ fn pushSingleStream(
         };
         was_created = true;
         remote_head = init_head;
+        if (report.active) |r| try r.observeRemoteHead(remote_head);
 
         const k_copy = try allocator.dupe(u8, st_id);
         errdefer allocator.free(k_copy);
@@ -1732,7 +1822,10 @@ fn pushSingleStream(
     else
         false;
 
+    if (report.active) |r| try r.observeRemoteHead(remote_head);
+
     if (heads_equal) {
+        if (report.active) |r| try r.observeResultHead(remote_head);
         // Heads agree, but a previous push may have been interrupted before
         // its incorporated-work deposit landed — deposits are idempotent, so
         // reconcile here as well (#73).
@@ -1750,6 +1843,7 @@ fn pushSingleStream(
                     defer allocator.free(mc);
                     if (std.mem.eql(u8, mc, rh)) {
                         try reanchorForkRecord(allocator, fs, root, &loaded.stream, mc);
+                        if (report.active) |r| try r.observeResultHead(rh);
                         return .{ .sent_changes = 0, .was_created = was_created };
                     }
                 }
@@ -1826,10 +1920,22 @@ fn pushSingleStream(
         const batch_end = @min(batch_start + MaxBatchChanges, send_lines.len);
         const batch = send_lines[batch_start..batch_end];
         const new_head = try client.append(st_id, cur_expected, batch);
+        if (report.active) |r| {
+            // send_lines[si] is raw_lines[suffix_rev[len-1-si]] — the confirmed
+            // Change ids, in append order.
+            for (batch_start..batch_end) |si| {
+                try r.noteAffected(loaded.changes[suffix_rev.items[send_lines.len - 1 - si]].id);
+            }
+        }
         if (cur_expected) |ce| allocator.free(ce);
         cur_expected = new_head;
         sent += batch.len;
         batch_start = batch_end;
+    }
+
+    if (report.active) |r| {
+        try r.observeRemoteHead(cur_expected);
+        try r.observeResultHead(cur_expected);
     }
 
     // The head chain is published; now publish the incorporated work the new
@@ -1914,6 +2020,12 @@ pub fn cmdPush(
     defer allocator.free(remote_url);
     fsys.setErrContext("push", remote_url);
 
+    if (report.active) |r| {
+        try r.setRemoteUrl(remote_url);
+        try r.setScope(target.ws_name, target.stream.name);
+        try r.observeBaseHead(target.stream.head);
+    }
+
     var auth_key = try loadAuthKey(allocator, fs, auth_key_flag, env_auth_key);
     defer if (auth_key) |*k| @memset(k, 0);
 
@@ -1934,6 +2046,7 @@ pub fn cmdPush(
     defer client.deinit();
 
     try client.handshake(auth_key);
+    if (report.active) |r| r.setRemoteSpecRev(client.server_spec_rev);
 
     var server_heads = try client.heads();
     defer freeHeadsMap(allocator, &server_heads);
@@ -1951,6 +2064,12 @@ pub fn cmdPush(
             .stream = target.stream.id,
         };
         try store.writeWorkspaceRemote(allocator, fs, root, wn, rc);
+    }
+
+    if (report.active) |r| {
+        if (res.sent_changes == 0 and !res.was_created) r.setKind(.noop);
+        try r.fieldInt("sent", res.sent_changes);
+        try r.fieldBool("created", res.was_created);
     }
 
     if (res.sent_changes == 0 and !res.was_created) {
@@ -2032,22 +2151,40 @@ pub fn cmdPull(
     defer allocator.free(remote_url);
     fsys.setErrContext("pull", remote_url);
 
+    if (report.active) |r| {
+        try r.setRemoteUrl(remote_url);
+        try r.setScope(target.ws_name, target.stream.name);
+        // A pull failure can never claim the remote was fully observed.
+        r.setRemoteErrorOutcome(.unknown);
+    }
+
     var auth_key = try loadAuthKey(allocator, fs, auth_key_flag, env_auth_key);
     defer if (auth_key) |*k| @memset(k, 0);
 
     var loaded = try store.loadStream(allocator, fs, root, target.stream.id);
     defer loaded.deinit(allocator);
 
+    if (report.active) |r| try r.observeBaseHead(loaded.stream.head);
+
     const transport = try dialRemote(dial_fn, dial_ctx, read_timeout_ms, allocator, io, remote_url);
     var client = SyncClient.init(allocator, transport);
     defer client.deinit();
 
     try client.handshake(auth_key);
+    if (report.active) |r| r.setRemoteSpecRev(client.server_spec_rev);
 
     const remote_rec = try client.open(target.stream.id);
     defer remote_rec.deinit(allocator);
+    if (report.active) |r| try r.observeRemoteHead(remote_rec.head);
 
     const remote_head = remote_rec.head orelse {
+        if (report.active) |r| {
+            r.setKind(.noop);
+            r.remote_outcome = .unchanged;
+            try r.observeResultHead(loaded.stream.head);
+            try r.fieldInt("received", 0);
+            try r.fieldBool("reset", reset_flag);
+        }
         try stdout.writeAll("flint: pull up to date\n");
         return;
     };
@@ -2059,12 +2196,26 @@ pub fn cmdPull(
         // `forked_from.change`) means local is a superset of remote.
         if (loaded.stream.forked_from) |ff| {
             if (std.mem.eql(u8, remote_head, ff.change)) {
+                if (report.active) |r| {
+                    r.setKind(.noop);
+                    r.remote_outcome = .unchanged;
+                    try r.observeResultHead(local_head);
+                    try r.fieldInt("received", 0);
+                    try r.fieldBool("reset", reset_flag);
+                }
                 try stdout.writeAll("flint: pull up to date\n");
                 return;
             }
         }
         for (loaded.changes) |c| {
             if (std.mem.eql(u8, c.id, remote_head)) {
+                if (report.active) |r| {
+                    r.setKind(.noop);
+                    r.remote_outcome = .unchanged;
+                    try r.observeResultHead(local_head);
+                    try r.fieldInt("received", 0);
+                    try r.fieldBool("reset", reset_flag);
+                }
                 try stdout.writeAll("flint: pull up to date\n");
                 return;
             }
@@ -2128,6 +2279,8 @@ pub fn cmdPull(
             if (fetch.lines.len == 0) "" else "head mismatch",
         );
     }
+    // Remote log fully fetched and verified — later refusals are local-side.
+    if (report.active) |r| r.remote_error_outcome = null;
 
     // Dedupe by id: a remote suffix may carry detached lines the local log
     // already holds. Identical bytes skip; the same id under different
@@ -2140,6 +2293,11 @@ pub fn cmdPull(
     for (loaded.changes, 0..) |*lc, li| try local_by_id.put(lc.id, local_raw[li]);
 
     var fresh: usize = 0;
+    var fresh_ids: std.ArrayList([]const u8) = .empty;
+    defer {
+        for (fresh_ids.items) |s| allocator.free(s);
+        fresh_ids.deinit(allocator);
+    }
     var append_buf: std.ArrayList(u8) = .empty;
     defer append_buf.deinit(allocator);
     for (fetch.lines) |line| {
@@ -2151,12 +2309,24 @@ pub fn cmdPull(
             }
             continue;
         }
+        if (report.active != null) {
+            const id_copy = try allocator.dupe(u8, rc.id);
+            errdefer allocator.free(id_copy);
+            try fresh_ids.append(allocator, id_copy);
+        }
         try append_buf.appendSlice(allocator, line);
         try append_buf.append(allocator, '\n');
         fresh += 1;
     }
 
     if (fresh == 0) {
+        if (report.active) |r| {
+            r.setKind(.noop);
+            r.remote_outcome = .unchanged;
+            try r.observeResultHead(local_head);
+            try r.fieldInt("received", 0);
+            try r.fieldBool("reset", reset_flag);
+        }
         try stdout.writeAll("flint: pull up to date\n");
         return;
     }
@@ -2166,10 +2336,12 @@ pub fn cmdPull(
     }
 
     // Append raw lines to `streams/<id>.jsonl` first, then rewrite `streams/<id>.json`.
+    if (report.active) |r| r.beginLocalWrites();
     const log_path = try store.streamLogPath(allocator, root, loaded.stream.id);
     defer allocator.free(log_path);
     try checkLogAppendBound(allocator, fs, log_path, append_buf.items.len);
     try fs.appendSync(allocator, log_path, append_buf.items);
+    if (report.active) |r| r.noteLocalWriteDone();
 
     const updated_stream = store.Stream{
         .id = loaded.stream.id,
@@ -2179,6 +2351,7 @@ pub fn cmdPull(
         .created = loaded.stream.created,
     };
     try store.writeStreamRecord(allocator, fs, root, updated_stream);
+    if (report.active) |r| r.noteLocalWriteDone();
 
     if (target.ws_name) |wn| {
         const rc = store.RemoteConfig{
@@ -2186,6 +2359,16 @@ pub fn cmdPull(
             .stream = loaded.stream.id,
         };
         try store.writeWorkspaceRemote(allocator, fs, root, wn, rc);
+    }
+
+    if (report.active) |r| {
+        r.remote_outcome = .applied;
+        try r.observeResultHead(remote_head);
+        r.noteRemoteReceived(fresh);
+        for (fresh_ids.items) |cid| try r.noteAffected(cid);
+        r.localApplied();
+        try r.fieldInt("received", fresh);
+        try r.fieldBool("reset", reset_flag);
     }
 
     try stdout.print("flint: pull ok stream={s} changes={d}\n", .{ loaded.stream.name, fresh });
@@ -2217,14 +2400,29 @@ fn pullResetToRemote(
     stdout: *Io.Writer,
 ) !void {
     const remote_head = remote_rec.head orelse {
+        if (report.active) |r| {
+            r.setKind(.noop);
+            r.remote_outcome = .unchanged;
+            try r.observeResultHead(loaded.stream.head);
+            try r.fieldInt("received", 0);
+            try r.fieldBool("reset", true);
+        }
         try stdout.writeAll("flint: pull up to date\n");
         return;
     };
     const local_head = loaded.stream.head;
     if (store.optStrEql(local_head, remote_head)) {
+        if (report.active) |r| {
+            r.setKind(.noop);
+            r.remote_outcome = .unchanged;
+            try r.observeResultHead(local_head);
+            try r.fieldInt("received", 0);
+            try r.fieldBool("reset", true);
+        }
         try stdout.writeAll("flint: pull up to date\n");
         return;
     }
+    if (report.active) |r| try r.observeRemoteHead(remote_head);
 
     // The two records must describe the same stream origin.
     if (!forkOriginEql(loaded.stream.forked_from, remote_rec.forked_from)) {
@@ -2245,6 +2443,8 @@ fn pullResetToRemote(
     if (!store.optStrEql(fetch.chain_tip, remote_head)) {
         return fsys.refuse("stream_malformed", "head mismatch");
     }
+    // Remote log fully fetched and verified — later refusals are local-side.
+    if (report.active) |r| r.remote_error_outcome = null;
 
     var remote_changes: std.ArrayList(store.Change) = .empty;
     defer {
@@ -2274,6 +2474,8 @@ fn pullResetToRemote(
 
     var missing: std.ArrayList([]const u8) = .empty;
     defer missing.deinit(allocator);
+    var missing_ids: std.ArrayList([]const u8) = .empty;
+    defer missing_ids.deinit(allocator);
     for (remote_changes.items, 0..) |c, ri| {
         if (local_ids.contains(c.id)) {
             // A shared id must carry identical bytes — the same id under
@@ -2286,6 +2488,7 @@ fn pullResetToRemote(
             continue;
         }
         try missing.append(allocator, remote_lines[ri]);
+        try missing_ids.append(allocator, c.id);
     }
 
     // Orphan guard: rolling the head to `remote_head` unroots the local head.
@@ -2325,11 +2528,13 @@ fn pullResetToRemote(
         try append_buf.appendSlice(allocator, line);
         try append_buf.append(allocator, '\n');
     }
+    if (report.active) |r| r.beginLocalWrites();
     const log_path = try store.streamLogPath(allocator, root, loaded.stream.id);
     defer allocator.free(log_path);
     if (append_buf.items.len > 0) {
         try checkLogAppendBound(allocator, fs, log_path, append_buf.items.len);
         try fs.appendSync(allocator, log_path, append_buf.items);
+        if (report.active) |r| r.noteLocalWriteDone();
     }
 
     const updated_stream = store.Stream{
@@ -2340,6 +2545,7 @@ fn pullResetToRemote(
         .created = loaded.stream.created,
     };
     try store.writeStreamRecord(allocator, fs, root, updated_stream);
+    if (report.active) |r| r.noteLocalWriteDone();
 
     if (ws_name) |wn| {
         const rc = store.RemoteConfig{
@@ -2347,6 +2553,16 @@ fn pullResetToRemote(
             .stream = loaded.stream.id,
         };
         try store.writeWorkspaceRemote(allocator, fs, root, wn, rc);
+    }
+
+    if (report.active) |r| {
+        r.remote_outcome = .applied;
+        try r.observeResultHead(remote_head);
+        r.noteRemoteReceived(missing.items.len);
+        for (missing_ids.items) |cid| try r.noteAffected(cid);
+        r.localApplied();
+        try r.fieldInt("received", missing.items.len);
+        try r.fieldBool("reset", true);
     }
 
     try stdout.print("flint: pull reset stream={s} changes={d} head={s}\n", .{ loaded.stream.name, missing.items.len, remote_head });

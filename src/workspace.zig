@@ -6,6 +6,7 @@ const FS = fsys.FS;
 const store = @import("store.zig");
 const uuid = @import("uuid.zig");
 const parser = @import("parser/parser.zig");
+const report = @import("report.zig");
 
 pub fn storedAtomFromParser(allocator: Allocator, id: []const u8, a: parser.Atom) !store.StoredAtom {
     const id_dup = try allocator.dupe(u8, id);
@@ -321,6 +322,10 @@ pub fn cmdAdd(
     defer idx.deinit();
 
     const ws = try store.resolveWorkspace(allocator, fs, &idx, ws_flag, paths.items);
+    if (report.active) |r| {
+        const sname = if (idx.streamByID(ws.stream)) |st| st.name else ws.stream;
+        try r.setScope(ws.name, sname);
+    }
     if (paths.items.len == 0) {
         const ws_src_dup = try allocator.dupe(u8, ws.src);
         errdefer allocator.free(ws_src_dup);
@@ -701,9 +706,36 @@ pub fn cmdAdd(
     const loaded_stream = try store.loadStream(allocator, fs, root, ws.stream);
     defer loaded_stream.deinit(allocator);
 
+    if (report.active) |r| r.beginLocalWrites();
     try store.writeWorkspaceAtoms(allocator, fs, root, ws.name, new_atoms.items);
     try store.writeWorkspaceStage(allocator, fs, root, ws.name, folded_stage);
     try store.writeWorkspaceStageBase(allocator, fs, root, ws.name, loaded_stream.stream.head);
+
+    if (report.active) |r| {
+        const stream_name = if (idx.streamByID(ws.stream)) |st| st.name else ws.stream;
+        try r.setScope(ws.name, stream_name);
+        try r.observeBaseHead(loaded_stream.stream.head);
+        try r.observeResultHead(loaded_stream.stream.head);
+        r.localApplied();
+        try r.fieldInt("files", disk_files.items.len);
+        try r.fieldInt("new", count_new);
+        try r.fieldInt("modified", count_mod);
+        try r.fieldInt("deleted", count_del);
+        try r.fieldInt("unchanged", count_unchanged);
+        var buf: std.ArrayList(u8) = .empty;
+        defer buf.deinit(allocator);
+        const limit = @min(affected_files.items.len, report.MaxListEntries);
+        try buf.append(allocator, '[');
+        for (affected_files.items[0..limit], 0..) |rel, fi| {
+            if (fi > 0) try buf.append(allocator, ',');
+            try report.escapeInto(&buf, allocator, rel);
+        }
+        try buf.append(allocator, ']');
+        try r.fieldRaw("affected", buf.items);
+        if (affected_files.items.len > limit) {
+            try r.fieldInt("affected_omitted", affected_files.items.len - limit);
+        }
+    }
 
     try out.print(
         "flint: add files={d} new={d} modified={d} deleted={d} unchanged={d}\n",
@@ -748,6 +780,11 @@ pub fn cmdStatus(
 
     const ws = try store.resolveWorkspace(allocator, fs, &idx, ws_flag, &.{});
 
+    if (report.active) |r| {
+        const sname = if (idx.streamByID(ws.stream)) |st| st.name else ws.stream;
+        try r.setScope(ws.name, sname);
+    }
+
     const atoms = try store.loadWorkspaceAtoms(allocator, fs, root, ws.name);
     defer store.freeStoredAtoms(allocator, atoms);
 
@@ -790,12 +827,53 @@ pub fn cmdStatus(
         }
     }
 
+    store.sortOps(stage);
+
+    if (report.active) |r| {
+        if (idx.streamByID(ws.stream)) |st| try r.observeResultHead(st.head);
+        const sb = try store.loadWorkspaceStageBase(allocator, fs, root, ws.name);
+        defer if (sb) |x| x.deinit(allocator);
+        try r.observeBaseHead(if (sb) |x| x.head else null);
+        try r.fieldInt("atoms", atoms.len);
+        try r.fieldInt("staged", stage.len);
+        try r.fieldInt("add", count_add);
+        try r.fieldInt("modify", count_mod);
+        try r.fieldInt("delete", count_del);
+        try r.fieldInt("duplicates", duplicates);
+        var buf: std.ArrayList(u8) = .empty;
+        defer buf.deinit(allocator);
+        const limit = @min(stage.len, report.MaxListEntries);
+        try buf.append(allocator, '[');
+        for (stage[0..limit], 0..) |op, oi| {
+            if (oi > 0) try buf.append(allocator, ',');
+            try buf.appendSlice(allocator, "{\"type\":");
+            try report.escapeInto(&buf, allocator, op.type);
+            try buf.appendSlice(allocator, ",\"atom\":");
+            try report.escapeInto(&buf, allocator, op.atom_id);
+            try buf.appendSlice(allocator, ",\"name\":");
+            try report.escapeInto(&buf, allocator, opQualifiedName(op, &atoms_by_id));
+            try buf.appendSlice(allocator, ",\"file\":");
+            if (op.new_span) |sp| {
+                try report.escapeInto(&buf, allocator, sp.file);
+            } else if (atoms_by_id.get(op.atom_id)) |a| {
+                try report.escapeInto(&buf, allocator, a.span.file);
+            } else {
+                try buf.appendSlice(allocator, "null");
+            }
+            try buf.append(allocator, '}');
+        }
+        try buf.append(allocator, ']');
+        try r.fieldRaw("ops", buf.items);
+        if (stage.len > limit) {
+            try r.fieldInt("ops_omitted", stage.len - limit);
+        }
+    }
+
     try out.print(
         "flint: status ws={s} stream={s} atoms={d} staged={d} add={d} modify={d} delete={d} duplicates={d}\n",
         .{ ws.name, stream_name, atoms.len, stage.len, count_add, count_mod, count_del, duplicates },
     );
 
-    store.sortOps(stage);
     const stage_cap: usize = 64;
     const limit = @min(stage.len, stage_cap);
     for (stage[0..limit]) |op| {

@@ -8,6 +8,7 @@ const json = @import("json.zig");
 const uuid = @import("uuid.zig");
 const ed25519 = @import("ed25519.zig");
 const content = @import("content.zig");
+const report = @import("report.zig");
 
 pub const ConflictDeleteVsModify = "delete_vs_modify";
 pub const ConflictDeleteVsMove = "delete_vs_move";
@@ -804,6 +805,11 @@ pub fn cmdMerge(
 
     const ws = try resolveMergeWorkspace(allocator, fs, &idx, ws_flag, from_name, from_stream_id);
 
+    if (report.active) |r| {
+        const into_name = if (idx.streamByID(ws.stream)) |st| st.name else ws.stream;
+        try r.setScope(ws.name, into_name);
+    }
+
     const stage = try store.loadWorkspaceStage(allocator, fs, root, ws.name);
     defer store.freeOps(allocator, stage);
     if (stage.len > 0) {
@@ -835,6 +841,15 @@ pub fn cmdMerge(
 
     const anc = try findCommonAncestor(allocator, into_loaded.stream.head, from_loaded.stream.head, &changes_by_id);
     if (anc.up_to_date) {
+        if (report.active) |r| {
+            r.setKind(.noop);
+            try r.observeBaseHead(into_loaded.stream.head);
+            try r.observeResultHead(into_loaded.stream.head);
+            r.beginConflicts();
+            try r.fieldStr("from", from_name);
+            try r.fieldOptStr("from_head", from_loaded.stream.head);
+            try r.fieldOptStr("ancestor", anc.ancestor_id);
+        }
         try out.writeAll("flint: merge up to date\n");
         return 0;
     }
@@ -857,6 +872,7 @@ pub fn cmdMerge(
     defer allocator.free(merge_path);
 
     if (!res.clean) {
+        if (report.active) |r| r.beginLocalWrites();
         const report_line = try json.marshalMergeReportLine(allocator, .{
             .into = into_head,
             .from = from_head,
@@ -865,6 +881,19 @@ pub fn cmdMerge(
         });
         defer allocator.free(report_line);
         try fs.writeFileSafe(allocator, merge_path, report_line);
+
+        if (report.active) |r| {
+            r.setKind(.conflicts);
+            try r.observeBaseHead(into_head);
+            try r.observeResultHead(null);
+            r.beginConflicts();
+            for (res.conflicts) |c| try r.noteConflict(c.atom_id, c.name, c.type);
+            if (r.conflicts_omitted > 0) try r.fieldInt("conflicts_omitted", r.conflicts_omitted);
+            r.localApplied();
+            try r.fieldStr("from", from_name);
+            try r.fieldStr("from_head", from_head);
+            try r.fieldOptStr("ancestor", anc.ancestor_id);
+        }
 
         for (res.conflicts) |c| {
             try out.print("flint: merge conflict atom={s} type={s}\n", .{ c.name, c.type });
@@ -1005,6 +1034,7 @@ pub fn cmdMerge(
 
     try ed25519.signChangeWithSeed(allocator, &c, &seed);
 
+    if (report.active) |r| r.beginLocalWrites();
     var updated_st = try store.appendStreamChange(allocator, fs, root, into_loaded.stream.id, into_head, c);
     updated_st.deinit(allocator);
 
@@ -1015,6 +1045,19 @@ pub fn cmdMerge(
     }
     if (fs.exists(allocator, merge_path)) {
         fs.remove(allocator, merge_path) catch {};
+    }
+
+    if (report.active) |r| {
+        try r.observeBaseHead(into_head);
+        try r.observeResultHead(c.id);
+        r.beginConflicts();
+        try r.noteAffected(c.id);
+        r.localApplied();
+        try r.fieldStr("from", from_name);
+        try r.fieldStr("from_head", from_head);
+        try r.fieldOptStr("ancestor", anc.ancestor_id);
+        try r.fieldInt("ops", c.ops.len);
+        try r.fieldInt("unmaterialized_files", unmaterialized_count);
     }
 
     try out.print("flint: merge ok conflicts=0 ops={d} id={s}\n", .{ c.ops.len, c.id });

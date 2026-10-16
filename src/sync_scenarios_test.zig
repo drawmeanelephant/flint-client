@@ -209,6 +209,24 @@ test "pull refuses an incomplete signed prefix that does not reach the remote he
         try std.testing.expectEqualStrings("flint: refuse stream_malformed head mismatch\n", res.out);
     }
 
+    // --json: the advertised head could not be verified — the remote was
+    // never fully observed, so the outcome is unknown, not unchanged.
+    {
+        const res = try hb.runCmd(&.{ "pull", "--json" });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 1), res.rc);
+        var p = try expectJsonOk(gpa, res.out);
+        defer p.deinit();
+        const o = p.value.object;
+        try std.testing.expectEqualStrings("refused", o.get("kind").?.string);
+        try std.testing.expectEqualStrings(
+            "stream_malformed",
+            o.get("refusal").?.object.get("name").?.string,
+        );
+        try std.testing.expectEqualStrings("unknown", o.get("remote").?.object.get("outcome").?.string);
+        try std.testing.expectEqualStrings("unchanged", o.get("local").?.string);
+    }
+
     const log_after = try fsb.readFile(gpa, log_path, store.MaxFileReadBytes);
     defer gpa.free(log_after);
     try std.testing.expectEqualStrings(log_before, log_after);
@@ -299,6 +317,24 @@ test "pull refuses when the fetched suffix would push the log past 4 MiB (#59)" 
         defer gpa.free(res.out);
         try std.testing.expectEqual(@as(u8, 1), res.rc);
         try std.testing.expectEqualStrings("flint: refuse store_too_large file\n", res.out);
+    }
+
+    // --json: the remote log was fully fetched and verified; the refusal is
+    // local-side, so nothing was applied and the remote outcome is a known
+    // "nothing changed", not unknown.
+    {
+        const res = try hb.runCmd(&.{ "pull", "--json" });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 1), res.rc);
+        var p = try expectJsonOk(gpa, res.out);
+        defer p.deinit();
+        const o = p.value.object;
+        try std.testing.expectEqualStrings("refused", o.get("kind").?.string);
+        try std.testing.expectEqualStrings(
+            "store_too_large",
+            o.get("refusal").?.object.get("name").?.string,
+        );
+        try std.testing.expectEqualStrings("unchanged", o.get("remote").?.object.get("outcome").?.string);
     }
 
     const log_after = try fsb.readFile(gpa, log_path, store.MaxFileReadBytes);
@@ -877,11 +913,31 @@ test "push deposits the original saved-fork origin so a fresh clone verifies it 
         &.{ "fork", "main", "saved-b" },
         &.{ "pull", "--ws=b", "--reset" },
         &.{ "merge", "--ws=b", "saved-b" },
-        &.{ "push", "--ws=b" },
     }) |cmd| {
         const res = try hb.runCmd(cmd);
         defer gpa.free(res.out);
         try std.testing.expectEqual(@as(u8, 0), res.rc);
+    }
+
+    // --json: the push reports the merge append AND the detached d1 deposit
+    // as confirmed remote publications, with d1 among the affected ids.
+    {
+        const res = try hb.runCmd(&.{ "push", "--ws=b", "--json" });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+        var p = try expectJsonOk(gpa, res.out);
+        defer p.deinit();
+        const o = p.value.object;
+        try std.testing.expectEqualStrings("ok", o.get("kind").?.string);
+        const rem = o.get("remote").?.object;
+        try std.testing.expectEqualStrings("applied", rem.get("outcome").?.string);
+        try std.testing.expect(rem.get("sent").?.integer >= 2);
+        const affected = o.get("changes").?.object.get("affected").?.array.items;
+        var saw_d1 = false;
+        for (affected) |a| {
+            if (std.mem.eql(u8, a.string, d1_id)) saw_d1 = true;
+        }
+        try std.testing.expect(saw_d1);
     }
 
     const saved_id = blk: {
@@ -1416,6 +1472,31 @@ test "commit refuses stage_stale when a sibling workspace advances the head (#67
         );
     }
 
+    // --json: the refusal carries the staged base in heads.base and the
+    // current head in heads.result — an agent can restage without parsing
+    // the detail string.
+    {
+        const res = try h.runCmd(&.{ "commit", "--ws=w2", "-m", "stale-stage", "--json" });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 1), res.rc);
+        var p = try expectJsonOk(gpa, res.out);
+        defer p.deinit();
+        const o = p.value.object;
+        try std.testing.expectEqualStrings("refused", o.get("kind").?.string);
+        const ref = o.get("refusal").?.object;
+        try std.testing.expectEqualStrings("stage_stale", ref.get("name").?.string);
+        try std.testing.expect(ref.get("detail").?.string.len > 0);
+        try std.testing.expectEqualStrings("w2", o.get("workspace").?.string);
+        const heads = o.get("heads").?.object;
+        try std.testing.expect(heads.get("base").?.string.len == 36);
+        try std.testing.expect(heads.get("result").?.string.len == 36);
+        try std.testing.expect(!std.mem.eql(
+            u8,
+            heads.get("base").?.string,
+            heads.get("result").?.string,
+        ));
+    }
+
     // Re-running `add` restages against c2; the commit then lands.
     {
         const res = try h.runCmd(&.{ "add", "--ws=w2", "/host/S2" });
@@ -1526,5 +1607,247 @@ test "merge after pull --reset marks unmaterialized atoms so add refuses src_beh
         defer gpa.free(res.out);
         try std.testing.expectEqual(@as(u8, 1), res.rc);
         try std.testing.expectEqualStrings("flint: refuse src_behind main.zig\n", res.out);
+    }
+
+    // --json: refusal name and offending path travel structurally.
+    {
+        const res = try hb.runCmd(&.{ "add", "--json", "/host/SRCB" });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 1), res.rc);
+        var p = try expectJsonOk(gpa, res.out);
+        defer p.deinit();
+        const o = p.value.object;
+        try std.testing.expectEqualStrings("refused", o.get("kind").?.string);
+        const ref = o.get("refusal").?.object;
+        try std.testing.expectEqualStrings("src_behind", ref.get("name").?.string);
+        try std.testing.expectEqualStrings("main.zig", ref.get("detail").?.string);
+        try std.testing.expectEqualStrings("unchanged", o.get("local").?.string);
+    }
+}
+
+/// Wraps `InProcServer.dial` and drops the response to `append` requests —
+/// the server applies the append, but the client never sees the
+/// acknowledgment. Exercises the `--json` `remote.outcome: unknown`
+/// requirement: a lost ack must not be reported as "nothing changed" (#79).
+const DropAppendAck = struct {
+    server: *sync.InProcServer,
+    armed: bool = true,
+
+    fn dial(dial_ctx: ?*anyopaque, allocator: Allocator, io: Io, remote_url: []const u8) anyerror!sync.Transport {
+        const self: *DropAppendAck = @ptrCast(@alignCast(dial_ctx.?));
+        const inner = try sync.InProcServer.dial(self.server, allocator, io, remote_url);
+        const t = try allocator.create(Inner);
+        t.* = .{ .inner = inner, .armed = self.armed };
+        return .{
+            .ptr = t,
+            .vtable = &.{
+                .requestLine = Inner.requestLineImpl,
+                .close = Inner.closeImpl,
+            },
+        };
+    }
+
+    const Inner = struct {
+        inner: sync.Transport,
+        armed: bool,
+        dropped: usize = 0,
+
+        fn requestLineImpl(ptr: *anyopaque, allocator: Allocator, req_line: []const u8) anyerror![]u8 {
+            const self: *Inner = @ptrCast(@alignCast(ptr));
+            const resp = try self.inner.requestLine(allocator, req_line);
+            if (self.armed and std.mem.indexOf(u8, req_line, "\"op\":\"append\"") != null) {
+                allocator.free(resp);
+                self.dropped += 1;
+                return error.ConnectionResetByPeer;
+            }
+            return resp;
+        }
+
+        fn closeImpl(ptr: *anyopaque, allocator: Allocator) void {
+            const self: *Inner = @ptrCast(@alignCast(ptr));
+            self.inner.close(allocator);
+            allocator.destroy(self);
+        }
+    };
+};
+
+fn expectJsonOk(gpa: Allocator, out: []const u8) !std.json.Parsed(std.json.Value) {
+    try std.testing.expect(std.mem.endsWith(u8, out, "\n"));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, out, "\n"));
+    return std.json.parseFromSlice(std.json.Value, gpa, out, .{});
+}
+
+test "--json: push/clone/pull envelopes; a lost append ack reports unknown, not unchanged" {
+    const gpa = std.testing.allocator;
+
+    var srv_mem = try fsys.MemFS.init(gpa);
+    defer srv_mem.deinit();
+    const srv_fs = srv_mem.fs();
+    try srv_fs.mkdir(gpa, "/srv/FLINT/streams");
+
+    var server = sync.InProcServer{
+        .allocator = gpa,
+        .fs = srv_fs,
+        .store_root = "/srv/FLINT",
+        .spec_rev = sync.SpecRev,
+    };
+
+    var ha = try TestHarness.init(gpa);
+    defer ha.deinit();
+    ha.env_sign_key = rfc8032_seed_hex;
+    ha.sync_dial = sync.InProcServer.dial;
+    ha.sync_dial_ctx = &server;
+    const fsa = ha.mem.fs();
+
+    try fsa.writeFileSafe(gpa, "/host/SRCA/main.zig", "pub const alpha: u32 = 1;\n");
+    for ([_][]const []const u8{
+        &.{ "init", "--name=a", "--src=/host/SRCA" },
+        &.{ "add", "/host/SRCA" },
+        &.{ "commit", "-m", "c1" },
+    }) |cmd| {
+        const res = try ha.runCmd(cmd);
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+    }
+
+    // push --json: created + sent=1, remote outcome applied, spec_rev echoed.
+    {
+        const res = try ha.runCmd(&.{ "push", "--json", "--remote=tcp://127.0.0.1:4748" });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+        var p = try expectJsonOk(gpa, res.out);
+        defer p.deinit();
+        const o = p.value.object;
+        try std.testing.expectEqualStrings("push", o.get("verb").?.string);
+        try std.testing.expectEqualStrings("ok", o.get("kind").?.string);
+        try std.testing.expectEqualStrings("a", o.get("workspace").?.string);
+        try std.testing.expectEqualStrings("main", o.get("stream").?.string);
+        const rem = o.get("remote").?.object;
+        try std.testing.expectEqualStrings("tcp://127.0.0.1:4748", rem.get("url").?.string);
+        try std.testing.expectEqualStrings("applied", rem.get("outcome").?.string);
+        try std.testing.expectEqual(@as(i64, 1), rem.get("sent").?.integer);
+        try std.testing.expectEqual(@as(i64, @intCast(sync.SpecRev)), rem.get("spec_rev").?.integer);
+        const d = o.get("data").?.object;
+        try std.testing.expectEqual(@as(i64, 1), d.get("sent").?.integer);
+        try std.testing.expect(d.get("created").?.bool);
+        const heads = o.get("heads").?.object;
+        try std.testing.expectEqualStrings(heads.get("result").?.string, heads.get("remote").?.string);
+        // The pushed Change id is reported as affected and was the base head.
+        const affected = o.get("changes").?.object.get("affected").?.array.items;
+        try std.testing.expectEqual(@as(usize, 1), affected.len);
+        try std.testing.expectEqualStrings(heads.get("base").?.string, affected[0].string);
+    }
+
+    // Second push is a no-op: kind noop, remote unchanged, nothing affected.
+    {
+        const res = try ha.runCmd(&.{ "push", "--json", "--remote=tcp://127.0.0.1:4748" });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+        var p = try expectJsonOk(gpa, res.out);
+        defer p.deinit();
+        const o = p.value.object;
+        try std.testing.expectEqualStrings("noop", o.get("kind").?.string);
+        try std.testing.expect(o.get("ok").?.bool);
+        try std.testing.expectEqualStrings("unchanged", o.get("remote").?.object.get("outcome").?.string);
+        try std.testing.expect(o.get("changes").? == .null);
+    }
+
+    // clone --json on a second harness.
+    var hb = try TestHarness.init(gpa);
+    defer hb.deinit();
+    hb.sync_dial = sync.InProcServer.dial;
+    hb.sync_dial_ctx = &server;
+    const fsb = hb.mem.fs();
+    try fsb.mkdir(gpa, "/host/SRCB");
+    {
+        const res = try hb.runCmd(&.{ "clone", "tcp://127.0.0.1:4748", "--stream=main", "--name=b", "--src=/host/SRCB", "--json" });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+        var p = try expectJsonOk(gpa, res.out);
+        defer p.deinit();
+        const o = p.value.object;
+        try std.testing.expectEqualStrings("clone", o.get("verb").?.string);
+        try std.testing.expectEqualStrings("ok", o.get("kind").?.string);
+        try std.testing.expectEqualStrings("b", o.get("workspace").?.string);
+        try std.testing.expectEqualStrings("applied", o.get("remote").?.object.get("outcome").?.string);
+        try std.testing.expectEqual(@as(i64, 1), o.get("remote").?.object.get("received").?.integer);
+        const d = o.get("data").?.object;
+        try std.testing.expectEqual(@as(i64, 1), d.get("replayed").?.integer);
+        try std.testing.expectEqual(@as(i64, 1), d.get("streams").?.integer);
+    }
+
+    // pull --json with nothing new: noop.
+    {
+        const res = try hb.runCmd(&.{ "pull", "--json", "--remote=tcp://127.0.0.1:4748" });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+        var p = try expectJsonOk(gpa, res.out);
+        defer p.deinit();
+        const o = p.value.object;
+        try std.testing.expectEqualStrings("noop", o.get("kind").?.string);
+        try std.testing.expectEqualStrings("unchanged", o.get("remote").?.object.get("outcome").?.string);
+        try std.testing.expectEqual(@as(i64, 0), o.get("data").?.object.get("received").?.integer);
+    }
+
+    // A commits c2; push through a transport whose append ack is lost even
+    // though the server applied the append.
+    try fsa.writeFileSafe(gpa, "/host/SRCA/main.zig", "pub const alpha: u32 = 2;\n");
+    ha.now += 5;
+    for ([_][]const []const u8{
+        &.{ "add", "/host/SRCA" },
+        &.{ "commit", "-m", "c2" },
+    }) |cmd| {
+        const res = try ha.runCmd(cmd);
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+    }
+
+    var dropper = DropAppendAck{ .server = &server };
+    ha.sync_dial = DropAppendAck.dial;
+    ha.sync_dial_ctx = &dropper;
+    {
+        const res = try ha.runCmd(&.{ "push", "--json", "--remote=tcp://127.0.0.1:4748" });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 1), res.rc);
+        var p = try expectJsonOk(gpa, res.out);
+        defer p.deinit();
+        const o = p.value.object;
+        try std.testing.expectEqualStrings("error", o.get("kind").?.string);
+        try std.testing.expectEqualStrings("connection reset by peer", o.get("error").?.object.get("name").?.string);
+        const rem = o.get("remote").?.object;
+        // The append may have landed — the honest outcome is `unknown`,
+        // never "the server changed nothing".
+        try std.testing.expectEqualStrings("unknown", rem.get("outcome").?.string);
+        try std.testing.expectEqual(@as(i64, 0), rem.get("sent").?.integer);
+    }
+
+    // The append did land remotely: a fresh push over a clean transport is a
+    // no-op (remote head == local head) — proving the first report could not
+    // have claimed `unchanged`.
+    ha.sync_dial = sync.InProcServer.dial;
+    ha.sync_dial_ctx = &server;
+    {
+        const res = try ha.runCmd(&.{ "push", "--json", "--remote=tcp://127.0.0.1:4748" });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+        var p = try expectJsonOk(gpa, res.out);
+        defer p.deinit();
+        try std.testing.expectEqualStrings("noop", p.value.object.get("kind").?.string);
+    }
+
+    // And B observes c2 via a normal pull — affected carries the new id.
+    {
+        const res = try hb.runCmd(&.{ "pull", "--json", "--remote=tcp://127.0.0.1:4748" });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+        var p = try expectJsonOk(gpa, res.out);
+        defer p.deinit();
+        const o = p.value.object;
+        try std.testing.expectEqualStrings("ok", o.get("kind").?.string);
+        try std.testing.expectEqualStrings("applied", o.get("remote").?.object.get("outcome").?.string);
+        try std.testing.expectEqual(@as(i64, 1), o.get("remote").?.object.get("received").?.integer);
+        const affected = o.get("changes").?.object.get("affected").?.array.items;
+        try std.testing.expectEqual(@as(usize, 1), affected.len);
+        try std.testing.expectEqual(@as(i64, 1), o.get("data").?.object.get("received").?.integer);
     }
 }

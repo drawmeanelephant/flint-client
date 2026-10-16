@@ -9,7 +9,7 @@
       "may_import": ["foundation"]
     },
     "model": {
-      "files": ["src/store.zig", "src/json.zig", "src/ed25519.zig"],
+      "files": ["src/store.zig", "src/json.zig", "src/ed25519.zig", "src/report.zig"],
       "may_import": ["foundation", "model"]
     },
     "parser": {
@@ -25,7 +25,7 @@
       "may_import": ["foundation", "model", "operations", "sync"]
     },
     "cli": {
-      "files": ["src/main.zig", "src/sync_scenarios_test.zig", "src/test_harness.zig", "src/content_scenarios_test.zig"],
+      "files": ["src/main.zig", "src/json_dispatch.zig", "src/json_results_test.zig", "src/sync_scenarios_test.zig", "src/test_harness.zig", "src/content_scenarios_test.zig"],
       "may_import": ["foundation", "model", "parser", "operations", "sync", "cli"]
     }
   }
