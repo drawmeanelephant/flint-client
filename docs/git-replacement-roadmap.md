@@ -139,7 +139,9 @@ no SCM can do, because none of them were built for agents:
   `log --where`) and wasm hooks (pre-commit, merge policy) behind a
   stable host ABI; identical behavior on macOS, Linux, VirelaiOS.
 - **Proposals** — in-store change proposals with signed approvals
-  (pull requests as store objects, not platform objects).
+  (pull requests as store objects, not platform objects). First slice
+  spec'd: [handoffs spec](flint-handoffs-spec.md) — signed
+  revision-bound handoff records, lifecycle, and packet transfer.
 
 **Wave 4 — scale and port.**
 
