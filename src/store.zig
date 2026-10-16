@@ -953,6 +953,32 @@ pub fn freeChanges(allocator: Allocator, changes: []Change) void {
     allocator.free(changes);
 }
 
+pub const RepeatedChangeId = struct {
+    stream: []const u8,
+    id: []const u8,
+};
+
+/// A stream log must not repeat a Change id: every writer dedupes by id, so a
+/// second occurrence means the log was inflated outside the format rules
+/// (#99, #100). Groups by each Change's signed `stream` binding and returns
+/// the first repeat. Loading tolerates the state — `verify` and the sync
+/// write paths surface it so an already-inflated store stays inspectable.
+pub fn findRepeatedChangeId(allocator: Allocator, changes: []const Change) !?RepeatedChangeId {
+    var per_stream = std.StringHashMap(std.StringHashMap(void)).init(allocator);
+    defer {
+        var it = per_stream.valueIterator();
+        while (it.next()) |m| m.deinit();
+        per_stream.deinit();
+    }
+    for (changes) |c| {
+        const sgop = try per_stream.getOrPut(c.stream);
+        if (!sgop.found_existing) sgop.value_ptr.* = std.StringHashMap(void).init(allocator);
+        const igop = try sgop.value_ptr.getOrPut(c.id);
+        if (igop.found_existing) return .{ .stream = c.stream, .id = c.id };
+    }
+    return null;
+}
+
 /// WriteStreamRecord writes `streams/<id>.json` crash-safely via `writeFileSafe`.
 pub fn writeStreamRecord(allocator: Allocator, fs: FS, root: []const u8, st: Stream) !void {
     const p = try streamRecordPath(allocator, root, st.id);

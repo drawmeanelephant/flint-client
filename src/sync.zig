@@ -1017,7 +1017,10 @@ pub const FetchResult = struct {
 /// the head chain. Each line either continues the chain (`parent` equals the
 /// current chain tip) or is detached; a detached line's `parent` must be null
 /// or already-seen content (`known_ids`, `expected_first_parent`, or an
-/// earlier fetched id) — ancestry completeness is the wire contract. The
+/// earlier fetched id) — ancestry completeness is the wire contract. A log
+/// holds each Change id once, so a repeated id anywhere in the reply refuses
+/// `change_malformed` (`duplicate id`, or `id conflict` when the repeat
+/// carries different bytes) — independent of chain classification (#99). The
 /// caller owns both `FetchResult` fields.
 fn fetchAndVerifyStreamChanges(
     allocator: Allocator,
@@ -1068,6 +1071,14 @@ fn fetchAndVerifyStreamChanges(
         while (it.next()) |k| try seen.put(k.*, {});
     }
 
+    // Ids emitted within this reply — deliberately not seeded with
+    // `expected_first_parent`/`known_ids`, since detached lines already held
+    // locally legitimately reappear once. A peer emits each Change at most
+    // once per log read: any repeat is a malformed reply (#99). Values are
+    // borrowed from `all_lines` for the byte comparison.
+    var emitted = std.StringHashMap([]const u8).init(allocator);
+    defer emitted.deinit();
+
     var chain_tip: ?[]u8 = if (expected_first_parent) |p| try allocator.dupe(u8, p) else null;
     errdefer if (chain_tip) |t| allocator.free(t);
 
@@ -1099,15 +1110,28 @@ fn fetchAndVerifyStreamChanges(
             }
         }
 
+        // A repeated id in one reply is malformed regardless of chain
+        // position: identical bytes are a duplicate, different bytes an id
+        // conflict (#99).
+        if (emitted.get(c.id)) |prior| {
+            const detail: []const u8 = if (std.mem.eql(u8, prior, raw_line))
+                "duplicate id"
+            else
+                "id conflict";
+            return fsys.refuse("change_malformed", detail);
+        }
+
         const ok = try ed25519.verifyChange(allocator, &c);
         if (!ok) {
             return fsys.refuse("sig_invalid", "");
         }
 
-        // `c` is freed at iteration end — dupe the id for the seen set.
+        // `c` is freed at iteration end — dupe the id for the seen/emitted
+        // sets; `seen_owned` frees it once for both.
         const key = try allocator.dupe(u8, c.id);
         try seen_owned.append(allocator, key);
         try seen.put(key, {});
+        try emitted.put(key, raw_line);
     }
 
     return .{
@@ -2204,6 +2228,15 @@ pub fn cmdPull(
 
     var loaded = try store.loadStream(allocator, fs, root, target.stream.id);
     defer loaded.deinit(allocator);
+
+    // A local log that already repeats a Change id is structurally invalid —
+    // e.g. inflated by a repeating peer before the #99 fix. Refuse before
+    // extending it; repair is the documented procedure in docs/runbooks.md.
+    if (try store.findRepeatedChangeId(allocator, loaded.changes)) |dup| {
+        const detail = try std.fmt.allocPrint(allocator, "{s} duplicate id {s}", .{ loaded.stream.id, dup.id });
+        defer allocator.free(detail);
+        return fsys.refuse("stream_malformed", detail);
+    }
 
     if (report.active) |r| try r.observeBaseHead(loaded.stream.head);
 

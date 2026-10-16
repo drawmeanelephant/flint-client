@@ -749,6 +749,13 @@ pub fn cmdVerify(
             try validateParsedChange(allocator, &c);
             try changes.append(allocator, c);
         }
+        // A stream log that repeats a Change id is structurally invalid
+        // (#100): refuse, naming stream and id — repair per docs/runbooks.md.
+        if (try store.findRepeatedChangeId(allocator, changes.items)) |dup| {
+            const detail = try std.fmt.allocPrint(allocator, "{s} duplicate id {s}", .{ dup.stream, dup.id });
+            defer allocator.free(detail);
+            return fsys.refuse("stream_malformed", detail);
+        }
         return verifyChangeList(allocator, changes.items, out);
     }
 
@@ -765,6 +772,13 @@ pub fn cmdVerify(
         defer store.freeChanges(allocator, changes);
         for (changes) |*c| {
             try validateParsedChange(allocator, c);
+        }
+        // A stream log that repeats a Change id is structurally invalid
+        // (#100): refuse, naming stream and id — repair per docs/runbooks.md.
+        if (try store.findRepeatedChangeId(allocator, changes)) |dup| {
+            const detail = try std.fmt.allocPrint(allocator, "{s} duplicate id {s}", .{ dup.stream, dup.id });
+            defer allocator.free(detail);
+            return fsys.refuse("stream_malformed", detail);
         }
         return verifyChangeList(allocator, changes, out);
     }

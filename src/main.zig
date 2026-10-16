@@ -2034,6 +2034,69 @@ test "commit, log, verify, and roll-forward" {
     }
 }
 
+test "verify --all and --file refuse a stream log that repeats a Change id (#100)" {
+    const gpa = std.testing.allocator;
+    var h = try TestHarness.init(gpa);
+    defer h.deinit();
+    h.env_sign_key = rfc8032_seed_hex;
+    const mfs = h.mem.fs();
+    try mfs.writeFileSafe(gpa, "/host/src/main.zig", "pub const a: u32 = 1;\n");
+    for ([_][]const []const u8{
+        &.{ "init", "--name=w", "--src=/host/src" },
+        &.{ "add", "/host/src" },
+        &.{ "commit", "-m", "c1" },
+    }) |cmd| {
+        const res = try h.runCmd(cmd);
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+    }
+
+    var idx = try store.loadStoreIndex(gpa, mfs, h.root);
+    defer idx.deinit();
+    const ws = idx.workspaces.items[0];
+    const log_path = try store.streamLogPath(gpa, h.root, ws.stream);
+    defer gpa.free(log_path);
+    const log_bytes = try mfs.readFile(gpa, log_path, store.MaxFileReadBytes);
+    defer gpa.free(log_bytes);
+    const first_line = log_bytes[0 .. std.mem.indexOfScalar(u8, log_bytes, '\n').? + 1];
+    var first_change = try json.parseChange(gpa, first_line[0 .. first_line.len - 1]);
+    defer first_change.deinit(gpa);
+
+    // A byte-identical copy of an earlier signed line — the state the #99
+    // write-path bug produced — is a structurally invalid log: every writer
+    // dedupes by id.
+    try mfs.appendSync(gpa, log_path, first_line);
+
+    const want = try std.fmt.allocPrint(
+        gpa,
+        "flint: refuse stream_malformed {s} duplicate id {s}\n",
+        .{ ws.stream, first_change.id },
+    );
+    defer gpa.free(want);
+    {
+        const res = try h.runCmd(&.{ "verify", "--all" });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 1), res.rc);
+        try std.testing.expectEqualStrings(want, res.out);
+    }
+    {
+        const file_arg = try std.fmt.allocPrint(gpa, "--file={s}", .{log_path});
+        defer gpa.free(file_arg);
+        const res = try h.runCmd(&.{ "verify", file_arg });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 1), res.rc);
+        try std.testing.expectEqualStrings(want, res.out);
+    }
+
+    // Read-only verbs still work so the store stays inspectable; repair is the
+    // documented manual procedure in docs/runbooks.md, never a rewrite.
+    {
+        const res = try h.runCmd(&.{"status"});
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+    }
+}
+
 test "commit, log, and key resolution refusals" {
     const gpa = std.testing.allocator;
     var host_fs = fsys.HostFS.init(std.testing.io);

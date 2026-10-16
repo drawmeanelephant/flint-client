@@ -214,7 +214,7 @@ def record(name, ok, detail):
 
 def run_scenario(fx, verb, title, op, mutate, must_refuse):
     client = fx.new_client("c%d" % len(RESULTS))
-    if verb == "pull":
+    if verb != "clone":
         rc, out, _ = flint(f"--store={client}", "clone", f"tcp://127.0.0.1:{fx.port}", "--stream=main", "--name=main", f"--src={client / 'src'}")
         assert rc == 0, out
         flint(f"--store={client}", "keygen", "--name=b")
@@ -227,6 +227,8 @@ def run_scenario(fx, verb, title, op, mutate, must_refuse):
     # invocation budget while still exercising the client's read deadline.
     if verb == "clone":
         args = [f"--store={client}", "clone", remote, "--stream=main", "--name=main", f"--src={client / 'src'}", "--read-timeout=2"]
+    elif verb == "pull --reset":
+        args = [f"--store={client}", "pull", f"--remote={remote}", "--stream=main", "--reset", "--read-timeout=2"]
     else:
         args = [f"--store={client}", "pull", f"--remote={remote}", "--stream=main", "--read-timeout=2"]
     rc, out, secs = flint(*args)
@@ -241,13 +243,13 @@ def run_scenario(fx, verb, title, op, mutate, must_refuse):
     elif "\x1b" in out:
         problems.append("terminal escape reached output")
     if rc != 0 and not problems or rc == 0 and verb == "clone" and title.startswith("remote stream name"):
-        if verb == "pull" and tree(client) != before:
+        if verb != "clone" and tree(client) != before:
             problems.append("failed pull changed the store")
         if verb == "clone" and rc != 0 and (client / "streams").is_dir() and os.listdir(client / "streams"):
             problems.append("failed clone left streams behind")
         if verb == "clone" and rc == 0 and title.startswith("remote stream name"):
             problems.append("stored/accepted malformed stream name")
-    if verb == "pull" and rc != 0 and not problems:
+    if verb != "clone" and rc != 0 and not problems:
         vrc, vout, _ = flint(f"--store={client}", "verify", "--all")
         if vrc != 0:
             problems.append("store fails verify afterwards")
@@ -336,6 +338,9 @@ def main():
             run_scenario(fx, "pull", title, op, mutate, must)
         for title, op, mutate, must in CLONE_ONLY:
             run_scenario(fx, "clone", title, op, mutate, must)
+        # Whole-log fetch leg: pull --reset must refuse a repeated Change id
+        # too (#99).
+        run_scenario(fx, "pull --reset", "duplicated changes", "read", mutate_changes(lambda c: c + c), True)
         pull_prefix(fx)
         pull_padded_pages(fx)
         push_hang(fx)

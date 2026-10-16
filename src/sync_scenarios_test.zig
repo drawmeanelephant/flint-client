@@ -17,7 +17,7 @@ const MutatingDial = struct {
     server: *sync.InProcServer,
     mode: Mode,
 
-    const Mode = enum { short_prefix, pad_pages };
+    const Mode = enum { short_prefix, pad_pages, dup_changes };
     const PAD_TO: usize = 900_000;
 
     fn dial(dial_ctx: ?*anyopaque, allocator: Allocator, io: Io, remote_url: []const u8) anyerror!sync.Transport {
@@ -41,7 +41,8 @@ const MutatingDial = struct {
 
         /// Splits the `changes` array of a `read` reply into its quoted-string
         /// elements (raw escaped bytes preserved). Caller frees `elems`.
-        fn readElements(allocator: Allocator, resp: []const u8) !struct { prefix: []const u8, elems: [][]const u8 } {
+        /// `tail` is everything from the closing `]` onward, borrowed.
+        fn readElements(allocator: Allocator, resp: []const u8) !struct { prefix: []const u8, elems: [][]const u8, tail: []const u8 } {
             const marker = "\"changes\":[";
             const at = std.mem.indexOf(u8, resp, marker) orelse return error.BadReply;
             var elems: std.ArrayList([]const u8) = .empty;
@@ -62,7 +63,11 @@ const MutatingDial = struct {
                 try elems.append(allocator, resp[start..i]);
                 if (i < resp.len and resp[i] == ',') i += 1;
             }
-            return .{ .prefix = resp[0 .. at + marker.len], .elems = try elems.toOwnedSlice(allocator) };
+            return .{
+                .prefix = resp[0 .. at + marker.len],
+                .elems = try elems.toOwnedSlice(allocator),
+                .tail = resp[i..],
+            };
         }
 
         fn rewrite(
@@ -94,6 +99,24 @@ const MutatingDial = struct {
             return out.toOwnedSlice(allocator);
         }
 
+        /// Repeats the `changes` array element-for-element — every signed line
+        /// twice, bytes identical — keeping the reply's own `more` tail (#99).
+        fn duplicate(resp: []const u8, allocator: Allocator) ![]u8 {
+            const r = try readElements(allocator, resp);
+            defer allocator.free(r.elems);
+            var out: std.ArrayList(u8) = .empty;
+            errdefer out.deinit(allocator);
+            try out.appendSlice(allocator, r.prefix);
+            for (0..2) |rep| {
+                for (r.elems, 0..) |e, i_e| {
+                    if (rep > 0 or i_e > 0) try out.append(allocator, ',');
+                    try out.appendSlice(allocator, e);
+                }
+            }
+            try out.appendSlice(allocator, r.tail);
+            return out.toOwnedSlice(allocator);
+        }
+
         fn requestLineImpl(ptr: *anyopaque, allocator: Allocator, req_line: []const u8) anyerror![]u8 {
             const self: *Inner = @ptrCast(@alignCast(ptr));
             const resp = try self.inner.requestLine(allocator, req_line);
@@ -111,6 +134,8 @@ const MutatingDial = struct {
                     if (self.read_calls == 1) return rewrite(resp, 3, true, PAD_TO, allocator);
                     return rewrite(resp, std.math.maxInt(usize), false, PAD_TO, allocator);
                 },
+                // Every page repeats its `changes` array verbatim (#99).
+                .dup_changes => return duplicate(resp, allocator),
             }
         }
 
@@ -340,6 +365,271 @@ test "pull refuses when the fetched suffix would push the log past 4 MiB (#59)" 
     const log_after = try fsb.readFile(gpa, log_path, store.MaxFileReadBytes);
     defer gpa.free(log_after);
     try std.testing.expectEqualStrings(log_before, log_after);
+}
+
+test "clone refuses a read reply that repeats Change ids (#99)" {
+    const gpa = std.testing.allocator;
+
+    var srv_mem = try fsys.MemFS.init(gpa);
+    defer srv_mem.deinit();
+    const srv_fs = srv_mem.fs();
+    try srv_fs.mkdir(gpa, "/srv/FLINT/streams");
+
+    var server = sync.InProcServer{
+        .allocator = gpa,
+        .fs = srv_fs,
+        .store_root = "/srv/FLINT",
+    };
+
+    var ha = try TestHarness.init(gpa);
+    defer ha.deinit();
+    ha.env_sign_key = rfc8032_seed_hex;
+    ha.sync_dial = sync.InProcServer.dial;
+    ha.sync_dial_ctx = &server;
+    const fsa = ha.mem.fs();
+
+    try fsa.writeFileSafe(gpa, "/host/SRCA/calc.go", "package calc\n\nfunc X() int {\n\treturn 1\n}\n");
+    for ([_][]const []const u8{
+        &.{ "init", "--name=a", "--src=/host/SRCA" },
+        &.{ "add", "/host/SRCA" },
+        &.{ "commit", "-m", "c1" },
+        &.{ "push", "--remote=tcp://127.0.0.1:4748" },
+    }) |cmd| {
+        const res = try ha.runCmd(cmd);
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+    }
+
+    var hb = try TestHarness.init(gpa);
+    defer hb.deinit();
+    const fsb = hb.mem.fs();
+
+    // A peer whose `read` reply repeats every Change must be refused before
+    // anything is written — a real log holds each Change id once (#99).
+    var md = MutatingDial{ .server = &server, .mode = .dup_changes };
+    hb.sync_dial = MutatingDial.dial;
+    hb.sync_dial_ctx = &md;
+    {
+        const res = try hb.runCmd(&.{
+            "clone",
+            "tcp://127.0.0.1:4748",
+            "--stream=main",
+            "--name=b",
+            "--src=/host/SRCB",
+        });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 1), res.rc);
+        try std.testing.expectEqualStrings("flint: refuse change_malformed duplicate id\n", res.out);
+    }
+    try std.testing.expect(!fsb.exists(gpa, "/host/FLINT/streams"));
+}
+
+test "pull and pull --reset refuse a read reply that repeats Change ids (#99)" {
+    const gpa = std.testing.allocator;
+
+    var srv_mem = try fsys.MemFS.init(gpa);
+    defer srv_mem.deinit();
+    const srv_fs = srv_mem.fs();
+    try srv_fs.mkdir(gpa, "/srv/FLINT/streams");
+
+    var server = sync.InProcServer{
+        .allocator = gpa,
+        .fs = srv_fs,
+        .store_root = "/srv/FLINT",
+    };
+
+    var ha = try TestHarness.init(gpa);
+    defer ha.deinit();
+    ha.env_sign_key = rfc8032_seed_hex;
+    ha.sync_dial = sync.InProcServer.dial;
+    ha.sync_dial_ctx = &server;
+    const fsa = ha.mem.fs();
+
+    try fsa.writeFileSafe(gpa, "/host/SRCA/calc.go", "package calc\n\nfunc X() int {\n\treturn 1\n}\n");
+    for ([_][]const []const u8{
+        &.{ "init", "--name=a", "--src=/host/SRCA" },
+        &.{ "add", "/host/SRCA" },
+        &.{ "commit", "-m", "c1" },
+        &.{ "push", "--remote=tcp://127.0.0.1:4748" },
+    }) |cmd| {
+        const res = try ha.runCmd(cmd);
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+    }
+
+    // Two honest clones behind the remote by one Change: `hb` pulls the
+    // suffix, `hr` re-fetches the whole log with --reset.
+    var hb = try TestHarness.init(gpa);
+    defer hb.deinit();
+    hb.sync_dial = sync.InProcServer.dial;
+    hb.sync_dial_ctx = &server;
+    const fsb = hb.mem.fs();
+    var hr = try TestHarness.init(gpa);
+    defer hr.deinit();
+    hr.sync_dial = sync.InProcServer.dial;
+    hr.sync_dial_ctx = &server;
+    const fsr = hr.mem.fs();
+    for ([_]*TestHarness{ hb, hr }, [_][]const u8{ "/host/SRCB", "/host/SRCR" }) |hx, src_dir| {
+        const src_arg = try std.fmt.allocPrint(gpa, "--src={s}", .{src_dir});
+        defer gpa.free(src_arg);
+        const res = try hx.runCmd(&.{
+            "clone",
+            "tcp://127.0.0.1:4748",
+            "--stream=main",
+            "--name=b",
+            src_arg,
+        });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+    }
+
+    const src = try std.fmt.allocPrint(gpa, "package calc\n\nfunc X() int {{\n\treturn {d}\n}}\n", .{2});
+    defer gpa.free(src);
+    try fsa.writeFileSafe(gpa, "/host/SRCA/calc.go", src);
+    ha.now += 5;
+    for ([_][]const []const u8{
+        &.{ "add", "/host/SRCA" },
+        &.{ "commit", "-m", "c2" },
+        &.{"push"},
+    }) |cmd| {
+        const res = try ha.runCmd(cmd);
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+    }
+
+    var idx = try store.loadStoreIndex(gpa, fsb, hb.root);
+    defer idx.deinit();
+    const log_path = try store.streamLogPath(gpa, hb.root, idx.streamByName("main").?.id);
+    defer gpa.free(log_path);
+    const log_before = try fsb.readFile(gpa, log_path, store.MaxFileReadBytes);
+    defer gpa.free(log_before);
+
+    // The suffix fetch returns [c2, c2]: the repeat refuses before any write.
+    var md = MutatingDial{ .server = &server, .mode = .dup_changes };
+    hb.sync_dial = MutatingDial.dial;
+    hb.sync_dial_ctx = &md;
+    {
+        const res = try hb.runCmd(&.{"pull"});
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 1), res.rc);
+        try std.testing.expectEqualStrings("flint: refuse change_malformed duplicate id\n", res.out);
+    }
+    const log_after = try fsb.readFile(gpa, log_path, store.MaxFileReadBytes);
+    defer gpa.free(log_after);
+    try std.testing.expectEqualStrings(log_before, log_after);
+
+    // The whole-log fetch returns [c1, c2, c1, c2]: same refusal, same
+    // all-or-nothing guarantee on --reset.
+    var idxr = try store.loadStoreIndex(gpa, fsr, hr.root);
+    defer idxr.deinit();
+    const reset_log_path = try store.streamLogPath(gpa, hr.root, idxr.streamByName("main").?.id);
+    defer gpa.free(reset_log_path);
+    const reset_log_before = try fsr.readFile(gpa, reset_log_path, store.MaxFileReadBytes);
+    defer gpa.free(reset_log_before);
+
+    var mdr = MutatingDial{ .server = &server, .mode = .dup_changes };
+    hr.sync_dial = MutatingDial.dial;
+    hr.sync_dial_ctx = &mdr;
+    {
+        const res = try hr.runCmd(&.{ "pull", "--reset" });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 1), res.rc);
+        try std.testing.expectEqualStrings("flint: refuse change_malformed duplicate id\n", res.out);
+    }
+    const reset_log_after = try fsr.readFile(gpa, reset_log_path, store.MaxFileReadBytes);
+    defer gpa.free(reset_log_after);
+    try std.testing.expectEqualStrings(reset_log_before, reset_log_after);
+
+    // The refused stores still verify.
+    for ([_]*TestHarness{ hb, hr }) |hx| {
+        const res = try hx.runCmd(&.{ "verify", "--all" });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+    }
+}
+
+test "pull refuses to extend a stream log that already repeats a Change id (#99)" {
+    const gpa = std.testing.allocator;
+
+    var srv_mem = try fsys.MemFS.init(gpa);
+    defer srv_mem.deinit();
+    const srv_fs = srv_mem.fs();
+    try srv_fs.mkdir(gpa, "/srv/FLINT/streams");
+
+    var server = sync.InProcServer{
+        .allocator = gpa,
+        .fs = srv_fs,
+        .store_root = "/srv/FLINT",
+    };
+
+    var ha = try TestHarness.init(gpa);
+    defer ha.deinit();
+    ha.env_sign_key = rfc8032_seed_hex;
+    ha.sync_dial = sync.InProcServer.dial;
+    ha.sync_dial_ctx = &server;
+    const fsa = ha.mem.fs();
+
+    try fsa.writeFileSafe(gpa, "/host/SRCA/calc.go", "package calc\n\nfunc X() int {\n\treturn 1\n}\n");
+    for ([_][]const []const u8{
+        &.{ "init", "--name=a", "--src=/host/SRCA" },
+        &.{ "add", "/host/SRCA" },
+        &.{ "commit", "-m", "c1" },
+        &.{ "push", "--remote=tcp://127.0.0.1:4748" },
+    }) |cmd| {
+        const res = try ha.runCmd(cmd);
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+    }
+
+    var hb = try TestHarness.init(gpa);
+    defer hb.deinit();
+    hb.sync_dial = sync.InProcServer.dial;
+    hb.sync_dial_ctx = &server;
+    const fsb = hb.mem.fs();
+    {
+        const res = try hb.runCmd(&.{
+            "clone",
+            "tcp://127.0.0.1:4748",
+            "--stream=main",
+            "--name=b",
+            "--src=/host/SRCB",
+        });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+    }
+
+    // Simulate a log inflated by the #99 write-path bug: append a
+    // byte-identical copy of an earlier signed line.
+    var idx = try store.loadStoreIndex(gpa, fsb, hb.root);
+    defer idx.deinit();
+    const stream_id = idx.streamByName("main").?.id;
+    const log_path = try store.streamLogPath(gpa, hb.root, stream_id);
+    defer gpa.free(log_path);
+    const log_clean = try fsb.readFile(gpa, log_path, store.MaxFileReadBytes);
+    defer gpa.free(log_clean);
+    const first_line = log_clean[0 .. std.mem.indexOfScalar(u8, log_clean, '\n').? + 1];
+    var first_change = try json.parseChange(gpa, first_line[0 .. first_line.len - 1]);
+    defer first_change.deinit(gpa);
+    try fsb.appendSync(gpa, log_path, first_line);
+    const log_inflated = try fsb.readFile(gpa, log_path, store.MaxFileReadBytes);
+    defer gpa.free(log_inflated);
+
+    // An honest pull must refuse, not silently tolerate the inflated log.
+    {
+        const res = try hb.runCmd(&.{"pull"});
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 1), res.rc);
+        const want = try std.fmt.allocPrint(
+            gpa,
+            "flint: refuse stream_malformed {s} duplicate id {s}\n",
+            .{ stream_id, first_change.id },
+        );
+        defer gpa.free(want);
+        try std.testing.expectEqualStrings(want, res.out);
+    }
+    const log_after = try fsb.readFile(gpa, log_path, store.MaxFileReadBytes);
+    defer gpa.free(log_after);
+    try std.testing.expectEqualStrings(log_inflated, log_after);
 }
 
 test "maximum-atom commit pushes and clones: >1 MiB change under the 4 MiB line bound (#60)" {
