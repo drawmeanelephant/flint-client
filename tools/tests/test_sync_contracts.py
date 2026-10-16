@@ -39,8 +39,10 @@ class SyncContractTests(unittest.TestCase):
         subprocess.run([str(SERVER), "init", f"--store={self.server_store}"],
                        env=self.env, check=True, capture_output=True, timeout=10)
         self.server = subprocess.Popen(
+            # 30s (not 2s): a debug client re-reading a multi-MB local log can
+            # pause longer than 2s between requests (#60 made such logs legal).
             [str(SERVER), "serve", f"--store={self.server_store}",
-             "--listen=127.0.0.1:0", "--read-timeout=15"],
+             "--listen=127.0.0.1:0", "--read-timeout=30"],
             env=self.env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
         self.addCleanup(self.stop_server)
         self.assertTrue(select.select([self.server.stderr], [], [], 5)[0], "startup deadline")
@@ -178,7 +180,7 @@ class SyncContractTests(unittest.TestCase):
                 self.ok(receiver, "verify", "--all")
 
     def test_short_signed_pull_must_reach_advertised_head(self):
-        """Valid signatures do not prove completeness: pull must reach the advertised head (#58)."""
+        """flint-client#58: a signed-but-short pull must refuse, not publish."""
         receiver = self.receiver("short")
         self.commit()
         self.commit()
@@ -194,14 +196,13 @@ class SyncContractTests(unittest.TestCase):
         before = snapshot(receiver)
         remote = self.proxy(shorten)
         result = self.run_client(receiver, "pull", f"--remote={remote}", "--read-timeout=2")
-        unchanged = snapshot(receiver) == before
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("refuse stream_malformed", result.stdout)
+        self.assertEqual(snapshot(receiver), before)
         self.ok(receiver, "verify", "--all")
-        self.assertEqual(result.returncode, 1, f"pull: {result.stdout}{result.stderr}")
-        self.assertIn("stream_malformed", result.stdout + result.stderr)
-        self.assertTrue(unchanged, "refused pull must not change the store")
 
     def test_aggregate_pull_bytes_must_not_publish_an_unreadable_store(self):
-        """Per-page bounds are not an aggregate bound: pull must not write a log over 4 MiB (#59)."""
+        """flint-client#59: per-page bounds are not an aggregate bound."""
         receiver = self.receiver("bounded")
         for _ in range(5):
             self.commit()
@@ -224,14 +225,13 @@ class SyncContractTests(unittest.TestCase):
         result = self.run_client(receiver, "pull", f"--remote={remote}", "--read-timeout=2")
         self.assertEqual(len(pages), 2)
         self.assertTrue(all(size < 4 * 1024 * 1024 for size in pages))
-        verification = self.run_client(receiver, "verify", "--all")
-        self.assertEqual(result.returncode, 1, f"pull: {result.stdout}{result.stderr}")
-        self.assertIn("store_too_large", result.stdout + result.stderr)
-        self.assertEqual(snapshot(receiver), before, "refused pull must not change the store")
-        self.assertEqual(verification.returncode, 0)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("refuse store_too_large", result.stdout)
+        self.assertEqual(snapshot(receiver), before)
+        self.ok(receiver, "verify", "--all")
 
     def test_maximum_atom_commit_must_clone_from_real_server(self):
-        """KNOWN flint-client#60, a producer-valid Change must be receivable."""
+        """flint-client#60: a producer-valid Change must be receivable."""
         (self.source / "main.zig").write_text(
             "pub const alpha: u32 = 1;\npub const beta: u32 = 10;\n"
             + "".join(f"pub const item_{i:04}: u32 = {i};\n" for i in range(4094)))
@@ -245,15 +245,41 @@ class SyncContractTests(unittest.TestCase):
         self.ok(self.author, "verify", "--all")
         self.ok(self.server_store, "verify", "--all")
         receiver = self.root / "large"
-        result = self.run_client(receiver, "clone", self.remote, "--stream=main", "--name=main",
-                                 f"--src={self.root / 'large-src'}")
-        fixed = result.returncode == 0
-        if fixed:
-            self.assertEqual(self.log(receiver), source)
-            self.ok(receiver, "verify", "--all")
-        self.pin_known("flint-client#60", fixed=fixed,
-                       reproduced=result.returncode == 1 and "refuse change_too_large" in result.stdout
-                       and not list((receiver / "streams").glob("*")))
+        self.ok(receiver, "clone", self.remote, "--stream=main", "--name=main",
+                f"--src={self.root / 'large-src'}")
+        self.assertEqual(self.log(receiver), source)
+        self.ok(receiver, "verify", "--all")
+
+    def test_clean_merge_after_reset_updates_workspace_atoms(self):
+        """flint-client#64: a clean merge must leave ATOMS describing the merged head."""
+        b = self.receiver("b")
+        self.ok(b, "keygen", "--name=b")
+
+        def edit(store, src, alpha, beta):
+            (src / "main.zig").write_text(
+                f"pub const alpha: u32 = {alpha};\npub const beta: u32 = {beta};\n")
+            self.ok(store, "add")
+            self.ok(store, "commit", "-m=independent-edit")
+
+        edit(self.author, self.source, 2, 10)
+        edit(b, self.root / "b-src", 1, 20)
+        self.push()
+        for args in [("fork", "main", "saved-b"),
+                     ("pull", "--reset", f"--remote={self.remote}"),
+                     ("merge", "saved-b"),
+                     ("push", f"--remote={self.remote}")]:
+            self.ok(b, *args)
+
+        def atoms(store):
+            return {a["name"]: a["hash"]
+                    for line in (store / "ws/main/ATOMS.jsonl").read_text().splitlines()
+                    for a in [json.loads(line)]}
+
+        # A pre-fix workspace table still described alpha=1 while the merged
+        # head's signed history has alpha=2 — compare against a fresh clone.
+        c = self.receiver("c")
+        self.assertEqual(atoms(b), atoms(c))
+        self.assertEqual({"main.alpha", "main.beta"}, set(atoms(b)))
 
     def test_version_revision_is_additive_and_needs_no_store(self):
         absent = object()

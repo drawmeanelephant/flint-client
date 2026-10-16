@@ -902,8 +902,12 @@ pub fn cmdMerge(
 
     try ed25519.signChangeWithSeed(allocator, &c, &seed);
 
-    const existing_atoms = try store.loadWorkspaceAtoms(allocator, fs, root, ws.name);
-    defer store.freeStoredAtoms(allocator, existing_atoms);
+    // The into-side table must describe the stream head, not whatever the
+    // workspace file last recorded — `pull --reset` can move the head without
+    // touching ws/<ws>/ATOMS.jsonl (#64). Rebuild it by replaying into_head.
+    const into_replay = try store.replayStreamAtoms(allocator, into_head, all_changes);
+    defer store.freeStoredAtoms(allocator, into_replay.atoms);
+    const existing_atoms = into_replay.atoms;
 
     var atoms_by_id = std.StringHashMap(store.StoredAtom).init(allocator);
     defer {
