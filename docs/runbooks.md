@@ -72,6 +72,42 @@ stream/change identifiers, and reproduction without exposing keys/source.
 Recover to a separate store from a verified backup or trusted remote only
 after a maintainer reviews the history. Keep the original for diagnosis.
 
+## Repeated Change id in a stream log (`stream_malformed … duplicate id`)
+
+`verify --all` (and `verify --file`) refuses
+`stream_malformed <stream-id> duplicate id <change-id>` when a stream log
+carries the same Change id twice, and `pull`/`pull --reset` refuse the same
+way rather than extend such a log. Clients between #75 and the #99 fix could
+write this state when a peer's `read` reply repeated its `changes` array;
+the extra lines are byte-identical copies — no signature is forged.
+
+1. Stop writers and back up the store (mode-0700, outside the repository —
+   it can contain private keys). `status`/`log`/`verify <id>` still work, so
+   the refused store stays inspectable.
+2. In `streams/<stream-id>.jsonl`, confirm every line carrying the named id
+   is byte-identical. The same id under different bytes is a real `id
+   conflict`, not a copy — stop and escalate to a maintainer instead.
+3. Write a replacement that keeps only the first occurrence of each id —
+   the copies were appended after the original, so first-occurrence order
+   is the intended log:
+
+   ```sh
+   python3 - streams/<stream-id>.jsonl > /tmp/log.fixed <<'PY'
+   import json, sys
+   seen = set()
+   for line in open(sys.argv[1]):
+       if json.loads(line)["id"] in seen:
+           continue
+       seen.add(json.loads(line)["id"])
+       sys.stdout.write(line)
+   PY
+   ```
+
+4. Move the original into the backup directory, install the replacement as
+   `streams/<stream-id>.jsonl`, then re-run `flint verify --all`. The next
+   `pull` appends normally. Never delete the first occurrence or reorder
+   lines.
+
 ## Missing/bad signing or auth key
 
 Use a key **name** or private key-file path, not a seed literal. Check that
