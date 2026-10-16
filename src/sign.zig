@@ -6,6 +6,7 @@ const FS = fsys.FS;
 const store = @import("store.zig");
 const uuid = @import("uuid.zig");
 const ed25519 = @import("ed25519.zig");
+const content = @import("content.zig");
 const report = @import("report.zig");
 
 pub const loadSigningSeed = ed25519.loadSigningSeed;
@@ -95,7 +96,35 @@ pub fn cmdCommit(
     const stage = try store.loadWorkspaceStage(allocator, fs, root, ws.name);
     defer store.freeOps(allocator, stage);
 
-    if (stage.len == 0) {
+    // Content capture (blobs spec §2/§3): inventory the tracked source root
+    // and compare it against the head revision's manifest. The store root is
+    // pruned so a store beneath src is never captured. An empty stage commits
+    // when — and only when — the inventory changed; otherwise the stage is
+    // genuinely empty and `nothing_to_commit` stands.
+    const inv = try content.scanInventory(allocator, fs, ws.src, root);
+    defer {
+        for (inv) |f| f.deinit(allocator);
+        allocator.free(inv);
+    }
+
+    var prev_files: []const content.ManifestFile = &.{};
+    var head_log: []content.Manifest = &.{};
+    defer {
+        for (head_log) |m| m.deinit(allocator);
+        if (head_log.len > 0) allocator.free(head_log);
+    }
+    {
+        head_log = try content.loadManifestLog(allocator, fs, root, ws.stream);
+        const head_st = idx.streamByID(ws.stream) orelse idx.streamByName(ws.stream);
+        if (head_st) |st| {
+            if (st.head) |hid| {
+                if (content.manifestForChange(head_log, hid)) |pm| prev_files = pm.files;
+            }
+        }
+    }
+
+    const content_changed = !content.inventoriesEqual(inv, prev_files);
+    if (stage.len == 0 and !content_changed) {
         return fsys.refuse("nothing_to_commit", "");
     }
     if (idx.change_count + 1 > store.MaxChanges) {
@@ -127,6 +156,9 @@ pub fn cmdCommit(
     // documented explicit restage; there is no bypass flag. A stage without
     // BASE.json (written before this guard existed) has unknown provenance and
     // refuses the same way rather than silently assuming the latest head.
+    // The stage-stale guard protects staged *ops* against silent reparenting.
+    // A content-only commit (empty stage, changed inventory) carries no
+    // staged intent, so BASE.json is not required.
     const stage_base = try store.loadWorkspaceStageBase(allocator, fs, root, ws.name);
     defer if (stage_base) |sb| sb.deinit(allocator);
 
@@ -136,7 +168,9 @@ pub fn cmdCommit(
         try r.observeResultHead(expected_head);
     }
 
-    if (stage_base) |sb| {
+    if (stage.len == 0) {
+        // no staged ops: nothing to guard
+    } else if (stage_base) |sb| {
         if (!store.optStrEql(sb.head, expected_head)) {
             const detail = try std.fmt.allocPrint(
                 allocator,
@@ -169,6 +203,22 @@ pub fn cmdCommit(
         if (c.sig.len > 0) allocator.free(c.sig);
     }
 
+    // Sign the manifest BEFORE signChangeWithSeed: that call zeroes the
+    // seed buffer (ADR 0049 key hygiene), so any later use would sign with
+    // a wiped key.
+    var manifest = content.Manifest{
+        .stream = try allocator.dupe(u8, loaded.stream.id),
+        .change = try allocator.dupe(u8, c.id),
+        .author = "",
+        .files = inv,
+        .sig = "",
+    };
+    defer {
+        manifest.files = &.{}; // ownership stays with `inv`
+        manifest.deinit(allocator);
+    }
+    try content.signManifest(allocator, &manifest, seed);
+
     try ed25519.signChangeWithSeed(allocator, &c, &seed);
 
     if (before_commit_append) |hook| {
@@ -181,9 +231,25 @@ pub fn cmdCommit(
     var updated_st = try store.appendStreamChange(allocator, fs, root, loaded.stream.id, expected_head, c);
     updated_st.deinit(allocator);
 
+    // Step (3): write referenced blobs, then append the signed manifest —
+    // content lands before the manifest that names it (spec §1 order).
+    for (inv) |f| {
+        if (f.blob) |bid| {
+            const src_file = try fsys.joinPath(allocator, &.{ ws.src, f.path });
+            defer allocator.free(src_file);
+            const bytes = try fs.readFile(allocator, src_file, content.MaxBlobBytes);
+            defer allocator.free(bytes);
+            try content.writeBlobBytes(allocator, fs, root, bid, bytes);
+        }
+    }
+    try content.appendManifestLine(allocator, fs, root, &manifest);
+
     const stage_path = try store.workspaceStagePath(allocator, root, ws.name);
     defer allocator.free(stage_path);
-    try fs.remove(allocator, stage_path);
+    // A content-only commit (empty stage) may never have written STAGE.jsonl.
+    if (fs.exists(allocator, stage_path)) {
+        try fs.remove(allocator, stage_path);
+    }
 
     const base_path = try store.workspaceBasePath(allocator, root, ws.name);
     defer allocator.free(base_path);
