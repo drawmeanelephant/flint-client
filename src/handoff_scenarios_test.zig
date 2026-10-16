@@ -722,3 +722,124 @@ fn countOccurrences(haystack: []const u8, needle: []const u8) usize {
     }
     return n;
 }
+
+test "handoff: export → verify → import packet round-trips records and ancestry" {
+    const gpa = std.testing.allocator;
+    var h = try TestHarness.init(gpa);
+    defer h.deinit();
+    h.env_sign_key = rfc8032_seed_hex;
+    const mfs = h.mem.fs();
+
+    const base = try setupTwoStreams(h, gpa, mfs);
+    defer gpa.free(base);
+    const sid = try streamIdByName(gpa, mfs, h.root, "main");
+    defer gpa.free(sid);
+
+    const p_out = try runOut(h, gpa, &.{
+        "handoff", "propose", "--stream=main", "--work=a-work", "-m", "adds Sub; ready",
+    }, 0);
+    defer gpa.free(p_out);
+    const hid = try handoffId(gpa, p_out);
+    defer gpa.free(hid);
+
+    const out_path = "/host/pkt.ndjson";
+    {
+        const out = try runOut(h, gpa, &.{
+            "handoff", "export", hid, "--out", out_path, "--with-changes",
+        }, 0);
+        defer gpa.free(out);
+        try std.testing.expect(std.mem.indexOf(u8, out, "records=1") != null);
+        try std.testing.expect(std.mem.indexOf(u8, out, "changes=") != null);
+    }
+
+    // Packet header shape + standalone verify.
+    const pkt = try mfs.readFile(gpa, out_path, store.MaxFileReadBytes);
+    defer gpa.free(pkt);
+    const header_end = std.mem.indexOfScalar(u8, pkt, '\n').?;
+    try std.testing.expect(std.mem.indexOf(u8, pkt[0..header_end], "FLINT-HANDOFF-PACKET/1") != null);
+    {
+        const out = try runOut(h, gpa, &.{ "handoff", "verify", out_path }, 0);
+        defer gpa.free(out);
+        try std.testing.expect(std.mem.indexOf(u8, out, "sig: verified") != null);
+    }
+
+    // Simulate the receiver: drop the handoffs dir, import, re-list.
+    const log_path = try store.handoffLogPath(gpa, h.root, sid);
+    defer gpa.free(log_path);
+    try mfs.remove(gpa, log_path);
+    {
+        const out = try runOut(h, gpa, &.{ "handoff", "list", "--stream=main" }, 0);
+        defer gpa.free(out);
+        try std.testing.expectEqualStrings("", std.mem.trim(u8, out, " \n"));
+    }
+    {
+        const out = try runOut(h, gpa, &.{ "handoff", "import", out_path }, 0);
+        defer gpa.free(out);
+        try std.testing.expect(std.mem.indexOf(u8, out, "records=1") != null);
+    }
+    {
+        const out = try runOut(h, gpa, &.{ "handoff", "list", "--stream=main" }, 0);
+        defer gpa.free(out);
+        try std.testing.expect(std.mem.indexOf(u8, out, hid) != null);
+        try std.testing.expect(std.mem.indexOf(u8, out, "state=proposed") != null);
+    }
+    // Re-import is a no-op: same ids, byte-identical.
+    {
+        const out = try runOut(h, gpa, &.{ "handoff", "import", out_path }, 0);
+        defer gpa.free(out);
+        try std.testing.expect(std.mem.indexOf(u8, out, "records=0") != null);
+    }
+    // The imported records are byte-identical to the packet's lines.
+    const log_raw = try mfs.readFile(gpa, log_path, store.MaxFileReadBytes);
+    defer gpa.free(log_raw);
+    const rec = try json.parseHandoffRecord(gpa, log_raw[0 .. log_raw.len - 1]);
+    defer rec.deinit(gpa);
+    try std.testing.expect(try ed25519.verifyHandoff(gpa, &rec));
+}
+
+test "handoff: import refuses a tampered packet and writes nothing" {
+    const gpa = std.testing.allocator;
+    var h = try TestHarness.init(gpa);
+    defer h.deinit();
+    h.env_sign_key = rfc8032_seed_hex;
+    const mfs = h.mem.fs();
+
+    const base = try setupTwoStreams(h, gpa, mfs);
+    defer gpa.free(base);
+    const sid = try streamIdByName(gpa, mfs, h.root, "main");
+    defer gpa.free(sid);
+
+    const p_out = try runOut(h, gpa, &.{
+        "handoff", "propose", "--stream=main", "--work=a-work", "-m", "tamper test",
+    }, 0);
+    defer gpa.free(p_out);
+    const hid = try handoffId(gpa, p_out);
+    defer gpa.free(hid);
+
+    const out_path = "/host/pkt2.ndjson";
+    {
+        const out = try runOut(h, gpa, &.{
+            "handoff", "export", hid, "--out", out_path,
+        }, 0);
+        gpa.free(out);
+    }
+
+    const pkt = try mfs.readFile(gpa, out_path, store.MaxFileReadBytes);
+    defer gpa.free(pkt);
+    // Flip the last byte of the sig field in the record line.
+    var tampered = try gpa.dupe(u8, pkt);
+    defer gpa.free(tampered);
+    const pos = std.mem.lastIndexOfScalar(u8, tampered[0 .. tampered.len - 1], '"').? - 3;
+    tampered[pos] = if (tampered[pos] == '0') '1' else '0';
+    const bad_path = "/host/pkt-bad.ndjson";
+    try mfs.writeFileSafe(gpa, bad_path, tampered);
+
+    const log_path = try store.handoffLogPath(gpa, h.root, sid);
+    defer gpa.free(log_path);
+    try mfs.remove(gpa, log_path);
+    const res = try h.runCmd(&.{ "handoff", "import", bad_path });
+    defer gpa.free(res.out);
+    try std.testing.expectEqual(@as(u8, 1), res.rc);
+    try std.testing.expect(std.mem.indexOf(u8, res.out, "sig_invalid") != null);
+    try std.testing.expect(!mfs.exists(gpa, log_path));
+}
