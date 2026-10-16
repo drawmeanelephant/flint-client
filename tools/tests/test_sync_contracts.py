@@ -39,8 +39,10 @@ class SyncContractTests(unittest.TestCase):
         subprocess.run([str(SERVER), "init", f"--store={self.server_store}"],
                        env=self.env, check=True, capture_output=True, timeout=10)
         self.server = subprocess.Popen(
+            # 30s (not 2s): a debug client re-reading a multi-MB local log can
+            # pause longer than 2s between requests (#60 made such logs legal).
             [str(SERVER), "serve", f"--store={self.server_store}",
-             "--listen=127.0.0.1:0", "--read-timeout=2"],
+             "--listen=127.0.0.1:0", "--read-timeout=30"],
             env=self.env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
         self.addCleanup(self.stop_server)
         self.assertTrue(select.select([self.server.stderr], [], [], 5)[0], "startup deadline")
@@ -234,7 +236,7 @@ class SyncContractTests(unittest.TestCase):
                        and verification.returncode == 1 and "store_too_large" in verification.stdout)
 
     def test_maximum_atom_commit_must_clone_from_real_server(self):
-        """KNOWN flint-client#60, a producer-valid Change must be receivable."""
+        """flint-client#60: a producer-valid Change must be receivable."""
         (self.source / "main.zig").write_text(
             "pub const alpha: u32 = 1;\npub const beta: u32 = 10;\n"
             + "".join(f"pub const item_{i:04}: u32 = {i};\n" for i in range(4094)))
@@ -248,15 +250,10 @@ class SyncContractTests(unittest.TestCase):
         self.ok(self.author, "verify", "--all")
         self.ok(self.server_store, "verify", "--all")
         receiver = self.root / "large"
-        result = self.run_client(receiver, "clone", self.remote, "--stream=main", "--name=main",
-                                 f"--src={self.root / 'large-src'}")
-        fixed = result.returncode == 0
-        if fixed:
-            self.assertEqual(self.log(receiver), source)
-            self.ok(receiver, "verify", "--all")
-        self.pin_known("flint-client#60", fixed=fixed,
-                       reproduced=result.returncode == 1 and "refuse change_too_large" in result.stdout
-                       and not list((receiver / "streams").glob("*")))
+        self.ok(receiver, "clone", self.remote, "--stream=main", "--name=main",
+                f"--src={self.root / 'large-src'}")
+        self.assertEqual(self.log(receiver), source)
+        self.ok(receiver, "verify", "--all")
 
     def test_version_revision_is_additive_and_needs_no_store(self):
         absent = object()
