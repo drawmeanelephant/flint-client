@@ -298,6 +298,42 @@ fn findChange(changes: []const store.Change, id: []const u8) ?*const store.Chang
 
 /// Implements `flint checkout [--stream=<s>] [--ws=<n>] --change=<id>|--head
 /// --into=<dir> [--force]` — docs/flint-blobs-spec.md §4/§8.
+/// Resolves a stream record head to its Change, walking `forked_from`
+/// ancestry when the head is not in the stream's own log — the bare-fork and
+/// re-anchored-fork cases where the head Change lives on an origin stream's
+/// log (#88). Returns a caller-owned clone.
+fn resolveHeadChange(
+    allocator: Allocator,
+    fs: FS,
+    root: []const u8,
+    stream_id: []const u8,
+    stream_label: []const u8,
+) !store.Change {
+    var cur_id = try allocator.dupe(u8, stream_id);
+    defer allocator.free(cur_id);
+    var target: ?[]u8 = null;
+    defer if (target) |t| allocator.free(t);
+    var hops: usize = 0;
+    while (hops < store.MaxChanges) : (hops += 1) {
+        const loaded = try store.loadStream(allocator, fs, root, cur_id);
+        defer loaded.deinit(allocator);
+        if (target == null) {
+            target = try allocator.dupe(u8, loaded.stream.head orelse
+                return fsys.refuse("change_missing", stream_label));
+        }
+        if (findChange(loaded.changes, target.?)) |found| {
+            return try found.clone(allocator);
+        }
+        const ff = loaded.stream.forked_from orelse {
+            return fsys.refuse("change_missing", target.?);
+        };
+        const nid = try allocator.dupe(u8, ff.stream);
+        allocator.free(cur_id);
+        cur_id = nid;
+    }
+    return fsys.refuse("store_too_large", "fork ancestry");
+}
+
 pub fn cmdCheckout(
     allocator: Allocator,
     fs: FS,
@@ -375,39 +411,31 @@ pub fn cmdCheckout(
             (idx.streamByID(stream_flag) orelse {
                 return fsys.refuse("stream_missing", stream_flag);
             });
-        const loaded = try store.loadStream(allocator, fs, root, st.id);
-        defer loaded.deinit(allocator);
         if (want_head) {
-            const head = loaded.stream.head orelse {
-                return fsys.refuse("change_missing", st.name);
-            };
-            target_id = head;
+            bound = try resolveHeadChange(allocator, fs, root, st.id, st.name);
         } else {
-            target_id = change_flag;
+            // An explicitly stream-scoped --change must live in that
+            // stream's own log — the pinned selector policy.
+            const loaded = try store.loadStream(allocator, fs, root, st.id);
+            defer loaded.deinit(allocator);
+            const found = findChange(loaded.changes, change_flag) orelse {
+                return fsys.refuse("change_missing", change_flag);
+            };
+            bound = try found.clone(allocator);
         }
-        const found = findChange(loaded.changes, target_id) orelse {
-            return fsys.refuse("change_missing", target_id);
-        };
-        bound = try found.clone(allocator);
     } else if (want_head) {
         var resolved_id: []const u8 = "";
+        var resolved_name: []const u8 = "";
         if (idx.workspaces.items.len == 1) {
             resolved_id = idx.workspaces.items[0].stream;
+            resolved_name = idx.workspaces.items[0].name;
         } else if (idx.streams.items.len == 1) {
             resolved_id = idx.streams.items[0].id;
+            resolved_name = idx.streams.items[0].name;
         } else {
             return fsys.refuse("usage", "");
         }
-        const loaded = try store.loadStream(allocator, fs, root, resolved_id);
-        defer loaded.deinit(allocator);
-        const head = loaded.stream.head orelse {
-            return fsys.refuse("change_missing", loaded.stream.name);
-        };
-        target_id = head;
-        const found = findChange(loaded.changes, target_id) orelse {
-            return fsys.refuse("change_missing", target_id);
-        };
-        bound = try found.clone(allocator);
+        bound = try resolveHeadChange(allocator, fs, root, resolved_id, resolved_name);
     } else {
         // Search every stream log for the Change; its own `stream` field
         // binds the manifest log (detached lines included).
