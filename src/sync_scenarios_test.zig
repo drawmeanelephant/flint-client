@@ -1016,3 +1016,102 @@ test "commit refuses stage_stale when a sibling workspace advances the head (#67
         try std.testing.expect(std.mem.startsWith(u8, res.out, "flint: commit ok id="));
     }
 }
+
+test "merge after pull --reset marks unmaterialized atoms so add refuses src_behind (#72)" {
+    const gpa = std.testing.allocator;
+
+    var srv_mem = try fsys.MemFS.init(gpa);
+    defer srv_mem.deinit();
+    const srv_fs = srv_mem.fs();
+    try srv_fs.mkdir(gpa, "/srv/FLINT/streams");
+
+    var server = sync.InProcServer{
+        .allocator = gpa,
+        .fs = srv_fs,
+        .store_root = "/srv/FLINT",
+    };
+
+    var ha = try TestHarness.init(gpa);
+    defer ha.deinit();
+    ha.env_sign_key = rfc8032_seed_hex;
+    ha.sync_dial = sync.InProcServer.dial;
+    ha.sync_dial_ctx = &server;
+    const fsa = ha.mem.fs();
+
+    try fsa.writeFileSafe(gpa, "/host/SRCA/main.zig", "pub const alpha: u32 = 1;\npub const beta: u32 = 10;\n");
+    for ([_][]const []const u8{
+        &.{ "init", "--name=a", "--src=/host/SRCA" },
+        &.{ "add", "/host/SRCA" },
+        &.{ "commit", "-m", "base" },
+        &.{ "push", "--remote=tcp://127.0.0.1:4748" },
+    }) |cmd| {
+        const res = try ha.runCmd(cmd);
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+    }
+
+    var hb = try TestHarness.init(gpa);
+    defer hb.deinit();
+    hb.env_sign_key = rfc8032_seed_hex;
+    hb.rng_seed = 77;
+    hb.sync_dial = sync.InProcServer.dial;
+    hb.sync_dial_ctx = &server;
+    const fsb = hb.mem.fs();
+
+    {
+        const res = try hb.runCmd(&.{
+            "clone",
+            "tcp://127.0.0.1:4748",
+            "--stream=main",
+            "--name=b",
+            "--src=/host/SRCB",
+        });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+    }
+
+    // A commits alpha=2 and pushes; B commits beta=20 locally — divergent.
+    try fsa.writeFileSafe(gpa, "/host/SRCA/main.zig", "pub const alpha: u32 = 2;\npub const beta: u32 = 10;\n");
+    ha.now += 5;
+    for ([_][]const []const u8{
+        &.{ "add", "/host/SRCA" },
+        &.{ "commit", "-m", "alpha=2" },
+        &.{"push"},
+    }) |cmd| {
+        const res = try ha.runCmd(cmd);
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+    }
+
+    try fsb.writeFileSafe(gpa, "/host/SRCB/main.zig", "pub const alpha: u32 = 1;\npub const beta: u32 = 20;\n");
+    hb.now += 3;
+    for ([_][]const []const u8{
+        &.{ "add", "/host/SRCB" },
+        &.{ "commit", "-m", "beta=20" },
+    }) |cmd| {
+        const res = try hb.runCmd(cmd);
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+    }
+
+    // Documented recovery: fork aside, reset main to remote, merge, push.
+    for ([_][]const []const u8{
+        &.{ "fork", "main", "saved-b" },
+        &.{ "pull", "--reset", "--remote=tcp://127.0.0.1:4748" },
+        &.{ "merge", "saved-b" },
+        &.{"push"},
+    }) |cmd| {
+        const res = try hb.runCmd(cmd);
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+    }
+
+    // B's src still carries its pre-recovery bytes (alpha=1): an ordinary
+    // `add` must refuse src_behind, not stage a silent revert of A's edit.
+    {
+        const res = try hb.runCmd(&.{ "add", "/host/SRCB" });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 1), res.rc);
+        try std.testing.expectEqualStrings("flint: refuse src_behind main.zig\n", res.out);
+    }
+}
