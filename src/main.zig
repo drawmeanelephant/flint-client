@@ -15,6 +15,7 @@ pub const sign = @import("sign.zig");
 pub const merge = @import("merge.zig");
 pub const sync = @import("sync.zig");
 pub const release = @import("release.zig");
+pub const content = @import("content.zig");
 pub const report = @import("report.zig");
 const jsond = @import("json_dispatch.zig");
 
@@ -108,6 +109,7 @@ fn printHelp(w: *Io.Writer) void {
         \\  clone <remote> --stream=<s> --name=<n> --src=<dir> [--auth-key=<file>]
         \\  push [--remote=<url>] [--stream=<s>] [--ws=<n>] [--auth-key=<file>]
         \\  pull [--remote=<url>] [--stream=<s>] [--ws=<n>] [--auth-key=<file>] [--reset]
+        \\  checkout [--stream=<s>] [--ws=<n>] --change=<id>|--head --into=<dir> [--force]
         \\  release --elf=<f> --name=<n> --version=<v> [--manifest-row=<r>] [--ws=<n>] [--key=<k>] [-m <msg>] [--dry-run]
         \\  parse-corpus <dir>
         \\  keygen [--name=<n>]
@@ -329,7 +331,8 @@ pub fn runWithContext(ctx: Context, args: []const []const u8) u8 {
         std.mem.eql(u8, verb, "merge") or
         std.mem.eql(u8, verb, "clone") or
         std.mem.eql(u8, verb, "push") or
-        std.mem.eql(u8, verb, "pull");
+        std.mem.eql(u8, verb, "pull") or
+        std.mem.eql(u8, verb, "checkout");
 
     if (!is_known_store_verb) {
         if (rep_opt != null) return jsond.fail(rep_opt, fsys.refuse("usage", ""), &ctx);
@@ -370,82 +373,14 @@ test {
     _ = merge;
     _ = sync;
     _ = release;
+    _ = content;
     _ = report;
     _ = @import("json_results_test.zig");
     _ = @import("sync_scenarios_test.zig");
+    _ = @import("content_scenarios_test.zig");
 }
 
-pub const TestHarness = struct {
-    allocator: Allocator,
-    mem: fsys.MemFS,
-    uuid_gen: uuid.UUIDGen,
-    now: i64 = 1760000000,
-    rng_seed: u8 = 1,
-    root: []const u8 = "/host/FLINT",
-    cwd: []const u8 = "/host",
-    env_sign_key: ?[]const u8 = null,
-    env_remote: ?[]const u8 = null,
-    env_auth_key: ?[]const u8 = null,
-    sync_dial: ?sync.DialFn = null,
-    sync_dial_ctx: ?*anyopaque = null,
-
-    pub fn init(allocator: Allocator) !*TestHarness {
-        const h = try allocator.create(TestHarness);
-        h.* = .{
-            .allocator = allocator,
-            .mem = try fsys.MemFS.init(allocator),
-            .uuid_gen = undefined,
-        };
-        h.uuid_gen = uuid.UUIDGen.initCustom(h, getNow, h, fillRand);
-        return h;
-    }
-
-    pub fn deinit(self: *TestHarness) void {
-        self.mem.deinit();
-        self.allocator.destroy(self);
-    }
-
-    fn getNow(ptr: ?*anyopaque) i64 {
-        const self: *TestHarness = @ptrCast(@alignCast(ptr.?));
-        return self.now;
-    }
-
-    fn fillRand(ptr: ?*anyopaque, buf: []u8) void {
-        const self: *TestHarness = @ptrCast(@alignCast(ptr.?));
-        for (buf) |*b| {
-            b.* = self.rng_seed;
-            self.rng_seed = self.rng_seed *% 31 +% 17;
-        }
-    }
-
-    pub fn runCmd(self: *TestHarness, args: []const []const u8) !struct { rc: u8, out: []u8 } {
-        var out_w: Io.Writer.Allocating = .init(self.allocator);
-        errdefer out_w.deinit();
-        var err_w: Io.Writer.Allocating = .init(self.allocator);
-        defer err_w.deinit();
-
-        const ctx = Context{
-            .allocator = self.allocator,
-            .io = std.testing.io,
-            .fs = self.mem.fs(),
-            .stdout = &out_w.writer,
-            .stderr = &err_w.writer,
-            .cwd = self.cwd,
-            .uuid_gen = &self.uuid_gen,
-            .env_flint_store = self.root,
-            .env_flint_sign_key = self.env_sign_key,
-            .env_flint_remote = self.env_remote,
-            .env_flint_auth_key = self.env_auth_key,
-            .sync_dial = self.sync_dial,
-            .sync_dial_ctx = self.sync_dial_ctx,
-        };
-        const rc = runWithContext(ctx, args);
-        return .{
-            .rc = rc,
-            .out = try out_w.toOwnedSlice(),
-        };
-    }
-};
+pub const TestHarness = @import("test_harness.zig").TestHarness;
 
 test "CLI verify --file on testdata/sig/{good,bad}.jsonl" {
     const gpa = std.testing.allocator;
@@ -1516,11 +1451,11 @@ test "add idempotent, edits, and full 245-atom corpus" {
             if (e.is_dir) continue;
             const disk_path = try std.fmt.allocPrint(gpa, "{s}/{s}", .{ dir, e.name });
             defer gpa.free(disk_path);
-            const content = try hfs.readFile(gpa, disk_path, store.MaxFileReadBytes);
-            defer gpa.free(content);
+            const file_bytes = try hfs.readFile(gpa, disk_path, store.MaxFileReadBytes);
+            defer gpa.free(file_bytes);
             const mem_path = try std.fmt.allocPrint(gpa, "/host/corpus/{s}/{s}", .{ sub, e.name });
             defer gpa.free(mem_path);
-            try mfs_full.writeFileSafe(gpa, mem_path, content);
+            try mfs_full.writeFileSafe(gpa, mem_path, file_bytes);
         }
     }
 

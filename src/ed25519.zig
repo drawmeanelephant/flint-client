@@ -14,6 +14,9 @@ const hex_digits = "0123456789abcdef";
 
 pub const domain_ops = "FLINT-OPS/1\x00";
 pub const domain_change = "FLINT-CHANGE/1\x00";
+/// Manifest preimage domain (docs/flint-blobs-spec.md §5): deliberately
+/// disjoint from the Change preimage domain.
+pub const domain_manifest = "flint-manifest-v1\n";
 
 fn lowerNibble(c: u8) ?u8 {
     if (c >= '0' and c <= '9') return c - '0';
@@ -244,6 +247,41 @@ pub fn verifySig(sig_bytes: [64]u8, msg: []const u8, author_bytes: [32]u8) bool 
     const sig = Ed25519.Signature.fromBytes(sig_bytes);
     sig.verify(msg, pk) catch return false;
     return true;
+}
+
+/// manifestSigMsg computes the manifest signature preimage:
+/// `"flint-manifest-v1\n" || canonical(<stream,change,author,files>)` where
+/// canonical is the Go-marshaled manifest object with `sig` excluded.
+pub fn manifestSigMsg(allocator: Allocator, m: store.Manifest) ![]u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+    try buf.appendSlice(allocator, domain_manifest);
+    try json.appendManifestBody(&buf, allocator, m);
+    return buf.toOwnedSlice(allocator);
+}
+
+/// Signs a manifest's canonical form with `seed` and stores the hex signature
+/// in `m.sig`. The seed is NOT wiped — callers needing the Change signature
+/// still sign through `signChangeWithSeed`, which wipes.
+pub fn signManifestWithSeed(allocator: Allocator, m: *store.Manifest, seed: [32]u8) !void {
+    defer std.crypto.secureZero(u8, @constCast(&seed)[0..]);
+    const msg = try manifestSigMsg(allocator, m.*);
+    defer allocator.free(msg);
+    const sig_bytes = try signMsg(msg, seed);
+    const sig_hex = encodeHexFixedLower(64, sig_bytes);
+    const new_sig = try allocator.dupe(u8, &sig_hex);
+    allocator.free(m.sig);
+    m.sig = new_sig;
+}
+
+/// VerifyManifest recomputes the manifest preimage and checks `m.sig` against
+/// `m.author` — which must equal the bound Change's author (caller's check).
+pub fn verifyManifest(allocator: Allocator, m: store.Manifest) !bool {
+    const msg = try manifestSigMsg(allocator, m);
+    defer allocator.free(msg);
+    const author = parseHex32Lower(m.author) orelse return false;
+    const sig = parseHex64Lower(m.sig) orelse return false;
+    return verifySig(sig, msg, author);
 }
 
 /// VerifyChange recomputes sig_msg from c's parsed fields and verifies c.sig against c.author.

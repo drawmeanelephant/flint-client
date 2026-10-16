@@ -174,8 +174,8 @@ test "--json: status/add/commit/verify envelopes carry structured results (#79)"
         var bad = try gpa.dupe(u8, good_raw);
         defer gpa.free(bad);
         bad[sig_pos] = if (bad[sig_pos] == '0') '1' else '0';
-        try mfs.writeFileSafe(gpa, "/host/SRJ/badlog.jsonl", bad);
-        const res = try h.runCmd(&.{ "verify", "--file=/host/SRJ/badlog.jsonl", "--json" });
+        try mfs.writeFileSafe(gpa, "/host/scratch/badlog.jsonl", bad);
+        const res = try h.runCmd(&.{ "verify", "--file=/host/scratch/badlog.jsonl", "--json" });
         defer gpa.free(res.out);
         try std.testing.expectEqual(@as(u8, 1), res.rc);
         var p = try parseJsonResult(gpa, res.out);

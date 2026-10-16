@@ -7,6 +7,7 @@ const store = @import("store.zig");
 const json = @import("json.zig");
 const uuid = @import("uuid.zig");
 const ed25519 = @import("ed25519.zig");
+const content = @import("content.zig");
 const report = @import("report.zig");
 
 pub const ConflictDeleteVsModify = "delete_vs_modify";
@@ -766,6 +767,7 @@ pub fn cmdMerge(
     allocator: Allocator,
     fs: FS,
     root: []const u8,
+    cwd: []const u8,
     uuid_gen: *uuid.UUIDGen,
     env_sign_key: ?[]const u8,
     out: *Io.Writer,
@@ -929,8 +931,6 @@ pub fn cmdMerge(
         if (c.sig.len > 0) allocator.free(c.sig);
     }
 
-    try ed25519.signChangeWithSeed(allocator, &c, &seed);
-
     // The into-side table must describe the stream head, not whatever the
     // workspace file last recorded — `pull --reset` can move the head without
     // touching ws/<ws>/ATOMS.jsonl (#64). Rebuild it by replaying into_head.
@@ -1007,11 +1007,42 @@ pub fn cmdMerge(
         }
     }
 
+    // Merge content (docs/flint-blobs-spec.md §7): the merge Change earns a
+    // signed manifest only when every merged path's accepted bytes are
+    // actually present in src. While merged content is unmaterialized the
+    // Change lands without a manifest — `checkout` refuses `blob_missing`
+    // rather than claiming substituted bytes. The manifest is signed here,
+    // before `signChangeWithSeed` wipes the seed.
+    var cap: ?content.CaptureResult = null;
+    defer if (cap) |cc| cc.deinit(allocator);
+    var manifest: ?store.Manifest = null;
+    defer if (manifest) |*mm| mm.deinit(allocator);
+    if (unmaterialized_count == 0) {
+        const mcount = try store.loadManifests(allocator, fs, root, into_loaded.stream.id);
+        defer store.freeManifests(allocator, mcount);
+        if (mcount.len + 1 > store.MaxManifests) {
+            return fsys.refuse("store_too_large", "manifests");
+        }
+        cap = try content.captureSnapshot(allocator, fs, cwd, root, ws.src);
+        manifest = try content.signSnapshot(allocator, into_loaded.stream.id, &change_id, seed, cap.?.entries);
+        const mline = try json.marshalManifestLine(allocator, manifest.?);
+        defer allocator.free(mline);
+        if (mline.len > store.MaxFileReadBytes) {
+            return fsys.refuse("store_too_large", "manifest");
+        }
+    }
+
+    try ed25519.signChangeWithSeed(allocator, &c, &seed);
+
     if (report.active) |r| r.beginLocalWrites();
     var updated_st = try store.appendStreamChange(allocator, fs, root, into_loaded.stream.id, into_head, c);
     updated_st.deinit(allocator);
 
     try store.writeWorkspaceAtoms(allocator, fs, root, ws.name, updated_atoms.items);
+    if (manifest) |mm| {
+        try content.writePendingBlobs(allocator, fs, cwd, root, cap.?.pending);
+        try store.appendManifest(allocator, fs, root, mm);
+    }
     if (fs.exists(allocator, merge_path)) {
         fs.remove(allocator, merge_path) catch {};
     }

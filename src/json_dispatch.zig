@@ -8,6 +8,7 @@ const report = @import("report.zig");
 const workspace = @import("workspace.zig");
 const sign = @import("sign.zig");
 const merge = @import("merge.zig");
+const content = @import("content.zig");
 const sync = @import("sync.zig");
 const ed25519 = @import("ed25519.zig");
 const uuid = @import("uuid.zig");
@@ -105,7 +106,7 @@ pub fn dispatchStoreVerb(
     }
 
     if (std.mem.eql(u8, verb, "commit")) {
-        sign.cmdCommit(ctx.allocator, ctx.fs, root, uuid_gen, ctx.env_flint_sign_key, out_w, sub) catch |err| {
+        sign.cmdCommit(ctx.allocator, ctx.fs, root, ctx.cwd, uuid_gen, ctx.env_flint_sign_key, out_w, sub) catch |err| {
             return fail(rep, err, ctx);
         };
         return ok(rep, 0, ctx);
@@ -126,7 +127,7 @@ pub fn dispatchStoreVerb(
     }
 
     if (std.mem.eql(u8, verb, "merge")) {
-        const rc = merge.cmdMerge(ctx.allocator, ctx.fs, root, uuid_gen, ctx.env_flint_sign_key, out_w, sub) catch |err| {
+        const rc = merge.cmdMerge(ctx.allocator, ctx.fs, root, ctx.cwd, uuid_gen, ctx.env_flint_sign_key, out_w, sub) catch |err| {
             return fail(rep, err, ctx);
         };
         return ok(rep, rc, ctx);
@@ -183,6 +184,13 @@ pub fn dispatchStoreVerb(
             out_w,
             sub,
         ) catch |err| {
+            return fail(rep, err, ctx);
+        };
+        return ok(rep, 0, ctx);
+    }
+
+    if (std.mem.eql(u8, verb, "checkout")) {
+        content.cmdCheckout(ctx.allocator, ctx.fs, root, ctx.cwd, out_w, sub) catch |err| {
             return fail(rep, err, ctx);
         };
         return ok(rep, 0, ctx);
