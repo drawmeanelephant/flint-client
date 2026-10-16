@@ -22,11 +22,17 @@ contain private keys: never attach them to issues or upload them.
 5. Verify history again, inspect the log, then push only after reviewing the
    merge. A merge/clone changes metadata, **not source materialization**.
    Reconcile disk source before `add`; `src_behind` prevents a silent revert.
-   To hand the rescue stream to another agent, `push --stream=<rescue-name>`:
-   the preserved origin Change can never join a remote log (its `stream`
-   field is inside the signed preimage), so push re-anchors the fork record
-   to the merge that incorporated it — the merge's signed `merged` link keeps
-   the original Change id for attribution.
+   To hand the rescue stream to another agent, `push --stream=<rescue-name>`.
+   On a deposit-capable server (spec_rev 3) push deposits the preserved
+   origin Change — with its unreachable ancestry — onto its own stream's
+   remote log as detached lines: the fork record keeps the original
+   `forked_from`, and a fresh clone can `verify` the original Change id
+   against its original author's key. On an older server the origin can
+   never join a remote log (its `stream` field is inside the signed
+   preimage), so push falls back to re-anchoring the fork record to the
+   merge that incorporated it — the merge's signed `merged` link keeps the
+   original Change id for attribution, but the original bytes remain local.
+   See the client spec §2.7 for the `deposit` wire contract.
 
 Success: expected heads/ancestry, valid signatures, no missing local history.
 The regression test filter `re-clone never overwrites` exercises this recovery.

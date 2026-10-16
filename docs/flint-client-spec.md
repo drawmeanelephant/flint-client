@@ -51,9 +51,9 @@ match the Go implementation exactly — the lines below are observed from
 | `merge <from> [--ws=<n>]` | Net-effect 3-way merge on Ops. The resulting workspace `ATOMS.jsonl` is rebuilt by replaying the merged head's history plus the merge Ops — it always describes the merged stream head, even when `pull --reset` previously moved the head past the workspace table. `flint: merge up to date`; on success `flint: merge ok conflicts=0 ops=<n> id=<id>` followed by `flint: merge src not materialized files=<n>`; conflicts print one `flint: merge conflict atom=<name> type=<t>` per conflict plus `flint: merge conflicts=<n>` (exit 2). Refuses `stage_dirty` when the workspace stage is non-empty. On conflict the client writes `ws/<ws>/MERGE.json`; resolve the conflicts in src, `add`, then `commit` — the commit consumes the marker and records the merged-in head, after which re-running the merge reports up to date. |
 | `parse-corpus <dir>` | Dev/conformance verb: parse every `.go`/`.zig` file, write `<dir>.OUT` = `parser.Render(atoms)` via the crash-safe write (**contractual — the corpus gate compares it byte-for-byte**), print `flint: parse files=<n> atoms=<m> parse_errors=<e>`. Keep — it is how the corpus gate runs. |
 | `keygen [--name=<n>]` | **New, host-only.** Generate a 32-byte seed, store it, print the derived public key hex. See §2.3. |
-| `clone <remote> --stream=<name\|id> [--name=<ws>] --src=<dir> [--auth-key=<file>] [--read-timeout=<sec>]` | **M106e remote verb.** Initialize store, follow `forked_from` chains (`open` + `read`), re-verify every Change (`sig_invalid` aborts before writing), replay atoms into `ws/<name>/ATOMS.jsonl`, write `WORKSPACE.json` and `REMOTE.json`. `--src` is created when absent (unlike `init`, which registers an existing source tree and keeps `src_missing`). **Clone gives you history, not files:** atoms land in `ATOMS.jsonl`, but no source files are materialized — the src dir stays empty, so a first `flint status` shows a clean workspace with nothing on disk; `verify`/`log`/`merge`/`push`/`pull` work regardless. Prints `flint: clone ok stream=<name> changes=<n>`. Never silently overwrites a stream that already exists locally: re-clone is allowed only as a fast-forward (the local log is a verified prefix of the remote log — the missing suffix is appended, the log is never rewritten). Refuses `fork_needed` when local and remote history diverge, `stream_exists` when local is strictly ahead or the record conflicts. |
-| `push [--remote=<url>] [--stream=<s>] [--ws=<n>] [--auth-key=<file>] [--read-timeout=<sec>]` | **M106e remote verb.** `create` any streams in the `forked_from` ancestry missing on the server, then `append` the client's unsent **first-parent** suffix — `pull --reset` can leave unreachable sibling lines in the local log that are never sent. When `create` refuses `change_missing` because a bare fork pointer's `forked_from.change` is absent remotely (a sibling line can never be appended — `stream` is inside the signed preimage), push re-anchors the fork record — locally and in the retried `create` — to the merge Change on the origin stream's first-parent chain that incorporated it (`merged == forked_from.change`), preserving attribution through the merge's signed `merged` link. A fork that carries its own Changes cannot re-anchor and still refuses `change_missing`. Prints `flint: push ok stream=<s> changes=<n>` or `flint: push up to date`. |
-| `pull [--remote=<url>] [--stream=<s>] [--ws=<n>] [--auth-key=<file>] [--reset] [--read-timeout=<sec>]` | **M106e remote verb.** `open`/`read after=<head>`, re-verify every pulled Change (`sig_invalid` aborts and writes nothing), require the fetched chain to reach the remote record's advertised head (`stream_malformed head mismatch` on a signed proper prefix), refuse `store_too_large` when the resulting log would exceed the 4 MiB file bound, append raw lines, roll local stream record forward. Prints `flint: pull ok stream=<s> changes=<n>` or `flint: pull up to date`. Refuses `fork_needed` when remote head diverges from local head. With `--reset`: fetch and verify the whole remote log, append the remote Changes the local log lacks, and roll the local head to the remote head — refusing `fork_needed` unless the local head stays reachable through another stream's ancestry (i.e. `flint fork <stream> <aside>` first). Divergent local Changes remain in the log as unreachable sibling lines. Prints `flint: pull reset stream=<s> changes=<n> head=<id>`. Recovery journey: `fork` → `pull --reset` → `merge <aside>` → `push`. Pull never rewrites `STAGE.jsonl` or `BASE.json`: a stage prepared before the pull keeps its recorded base, so a later `commit` refuses `stage_stale` until `add` restages it. |
+| `clone <remote> --stream=<name\|id> [--name=<ws>] --src=<dir> [--auth-key=<file>] [--read-timeout=<sec>]` | **M106e remote verb.** Initialize store, follow `forked_from` chains (`open` + `read`), re-verify every Change (`sig_invalid` aborts before writing), replay atoms into `ws/<name>/ATOMS.jsonl`, write `WORKSPACE.json` and `REMOTE.json`. `--src` is created when absent (unlike `init`, which registers an existing source tree and keeps `src_missing`). **Clone gives you history, not files:** atoms land in `ATOMS.jsonl`, but no source files are materialized — the src dir stays empty, so a first `flint status` shows a clean workspace with nothing on disk; `verify`/`log`/`merge`/`push`/`pull` work regardless. Prints `flint: clone ok stream=<name> changes=<n>`. Never silently overwrites a stream that already exists locally: re-clone is allowed only as a fast-forward — the remote log filtered to local Change ids must equal the local log line-for-line (**id order**, not byte position, since a remote log may carry detached lines, §2.7), then remote lines the local log lacks append in remote order; the log is never rewritten. Refuses `fork_needed` when local and remote history diverge, `stream_exists` when local is strictly ahead or the record conflicts. |
+| `push [--remote=<url>] [--stream=<s>] [--ws=<n>] [--auth-key=<file>] [--read-timeout=<sec>]` | **M106e remote verb.** `create` any streams in the `forked_from` ancestry missing on the server, then `append` the client's unsent **first-parent** suffix — `pull --reset` can leave unreachable sibling lines in the local log that `append` never sends. Then publish incorporated work (§2.7): for each Change in the stream's log whose `merged` link names a locally-held Change unreachable from the head, `deposit` that Change's detached ancestry onto the same stream so the signed link resolves remotely — retried on every push, including heads-equal pushes. When `create` refuses `change_missing` on an absent `forked_from.change`, `deposit` the origin's detached ancestry onto the origin stream and retry `create` with the original `forked_from` — no re-anchor; a fork carrying its own Changes publishes fully this way (record, then the ordinary `append` suffix). A server that predates `deposit` refuses `usage`; push then falls back to the spec_rev 2 path — a bare fork pointer re-anchors, locally and in the retried `create`, to the merge Change on the origin stream's first-parent chain that incorporated it (`merged == forked_from.change`), and a fork with its own Changes still refuses `change_missing`. Other `deposit` refusals surface normally; deposits are idempotent, so an interrupted push reconciles on the next run. Prints `flint: push ok stream=<s> changes=<n>` (head-chain count only) or `flint: push up to date`. |
+| `pull [--remote=<url>] [--stream=<s>] [--ws=<n>] [--auth-key=<file>] [--reset] [--read-timeout=<sec>]` | **M106e remote verb.** `open`/`read after=<head>`, re-verify every pulled Change (`sig_invalid` aborts and writes nothing), require the fetched chain to reach the remote record's advertised head (`stream_malformed head mismatch` on a signed proper prefix), refuse `store_too_large` when the resulting log would exceed the 4 MiB file bound, append raw lines, roll local stream record forward. The read runs even when the record heads already match — detached lines deposited since the last sync sit in the log suffix and still arrive (§2.7). Fetched lines dedupe by id: identical bytes skip, the same id under different bytes refuses `stream_malformed` (`id conflict`). Prints `flint: pull ok stream=<s> changes=<n>` (newly appended lines) or `flint: pull up to date`. Refuses `fork_needed` when remote head diverges from local head. With `--reset`: fetch and verify the whole remote log, append the remote Changes the local log lacks, and roll the local head to the remote head — refusing `fork_needed` unless the local head stays reachable through another stream's ancestry (i.e. `flint fork <stream> <aside>` first). Divergent local Changes remain in the log as unreachable sibling lines. Prints `flint: pull reset stream=<s> changes=<n> head=<id>`. Recovery journey: `fork` → `pull --reset` → `merge <aside>` → `push`. Pull never rewrites `STAGE.jsonl` or `BASE.json`: a stage prepared before the pull keeps its recorded base, so a later `commit` refuses `stage_stale` until `add` restages it. |
 | `release --elf=<f> --name=<n> --version=<v> [--manifest-row=<r>] [--ws=<n>] [--key=<k>] [-m <msg>] [--dry-run]` | **New, host-only.** Mints a release Change for the release-stream convention: computes `sha256(<elf>)`, renders `release.go` (`ReleaseName`, `ReleaseVersion`, `ReleaseELFSHA256`, `ReleaseManifestRow` consts in `package release`), writes it to the workspace src root, then stages and commits it through the existing `add`/`commit` machinery so the normal signing path applies. `--manifest-row` supplies the apps.txt v2 row; the default is the documented `<name> <version> <sha256>` placeholder. `-m` overrides the default `release <name> <version>` message. `--dry-run` prints the rendered file and touches nothing, not even the store root. Refuses `usage` on missing/invalid fields, `src_missing` on an unreadable ELF, and `stage_dirty` when the workspace stage is non-empty (a release Change carries exactly the release.go update). Prints the `add`/`commit` lines plus `flint: release ok name=<n> version=<v> sha256=<h>`. |
 | `version [--remote=<url>] [--auth-key=<file>]` | **New, host-only.** Prints `flint: version spec_rev=<n> proto=FLINT-SYNC/1` — `spec_rev` is the repo-root `SPECREV` integer (see `docs/spec-versioning.md`). With `--remote` or `FLINT_REMOTE`, performs the `hello` handshake and prints `flint: remote <url> proto=FLINT-SYNC/1 spec_rev=<n|unannounced>`. Needs no store. |
 
@@ -205,6 +205,101 @@ the same condition.
   fast-forward), `MERGE.json` shape, and the `src_behind` /
   `origin: merge` guard.
 - Output line formats for every verb (tests grep them).
+
+### 2.7 Detached Change lines and `deposit` (spec_rev 3, #73)
+
+A stream's `.jsonl` is append-only and may contain **detached** Change
+lines — valid signed Changes of that stream that do not sit on the
+head's first-parent chain. `pull --reset` already produces them locally
+(divergent local history stays in the log as unreachable siblings).
+spec_rev 3 makes the same representation publishable: a `deposit`
+request appends detached lines to a remote stream's log without moving
+its head, so preserved work — the original signed Change behind a saved
+recovery fork, or any work a merge's signed `merged` link names —
+becomes retrievable by a fresh agent. Nothing is re-signed, no id is
+rewritten, and the signed `stream` binding is preserved: a detached
+Change only ever travels to the log of the stream it was signed for.
+
+**Wire op** (one request, one reply):
+
+```json
+{"op":"deposit","seq":9,"stream":"<stream-id-or-name>","changes":["<raw line>",…]}
+{"seq":9,"ok":true,"head":"<head-id-or-null>","stored":<m>}
+```
+
+- `changes` carries raw Change lines, quoted exactly as `append` does;
+  1–256 per request (`change_malformed` on an empty or oversize batch).
+- Server-side validation mirrors `append`: well-formed Change,
+  `stream` field equals the target stream id, message bounds
+  (`message_invalid`), signature verifies (`sig_invalid`), and the
+  `--allow-author` gate (`author_not_allowed`). Refusals reuse the
+  existing vocabulary: `stream_missing`, `change_malformed`,
+  `change_too_large`, `message_invalid`, `sig_invalid`,
+  `author_not_allowed`, `store_too_large` (the 4096-Change and 4 MiB
+  log bounds apply to detached lines too).
+- **Detached rules.** A non-duplicate Change whose `parent` equals the
+  current head refuses `change_malformed` (`extends head` — that is an
+  `append`, not a `deposit`). Every deposited Change's `parent` must be
+  null, an id already in the target log, the stream's
+  `forked_from.change`, or an id earlier in the same batch —
+  `change_malformed` (`detached parent unknown`) otherwise. Deposits
+  are therefore **ancestry-complete**: a stored detached Change's whole
+  first-parent ancestry back to a root or to existing log content is
+  present in the same log.
+- **Deduplication.** An id already in the log with byte-identical
+  content is skipped and does not count toward `stored`; the same id
+  under different bytes refuses `change_malformed` (`id conflict`).
+  Deposits are idempotent — an interrupted transfer reconciles by
+  re-sending the same lines.
+- **All-or-nothing, head untouched.** The whole batch validates before
+  anything is written; the stream record is never rewritten — `head`
+  does not move and is echoed back for confirmation. Detached lines are
+  ordinary log lines for retention purposes and are returned verbatim
+  by `read` — no new retrieval op is needed.
+
+**Reader rules** — every client must tolerate a remote log that
+interleaves detached lines with the head chain:
+
+- Fetch verification classifies each line: a Change whose `parent`
+  continues the first-parent chain advances the chain cursor; anything
+  else is detached and must verify (`sig_invalid` unchanged) with a
+  `parent` that is null or already-seen content (local ids, the
+  `forked_from.change`, or an earlier fetched id) — `change_malformed`
+  otherwise, so orphan preservation is detectable.
+- The pull/clone head check runs on the chain cursor, not the last log
+  line: the advertised record head must be reached through the
+  first-parent chain (#58's rule, generalized).
+- Pulled lines dedupe by id against the local log (identical bytes
+  skip; different bytes under a shared id refuse `stream_malformed`,
+  `id conflict`).
+
+**Client push policy** — the wire mechanism is general, but `push`
+uses it in exactly two bounded ways:
+
+1. When `create` refuses `change_missing` on a `forked_from.change`,
+   `push` deposits the origin's detached first-parent ancestry onto the
+   origin stream and retries `create` with the original `forked_from`.
+2. After appending the head-chain suffix — and again when heads are
+   already equal — `push` deposits, for each locally-held `merged`
+   target unreachable from the head, that Change's detached ancestry
+   onto the same stream. A `merged` link thereby becomes resolvable
+   remotely while staying a signed id, not a dereference.
+
+A `merged` target whose bytes live on a different stream is covered by
+that stream's own push (`deposit` never crosses the signed `stream`
+binding). A server that predates `deposit` refuses `usage` — push then
+falls back to the spec_rev 2 behavior: bare fork pointers re-anchor to
+the incorporating merge, forks with their own Changes refuse
+`change_missing`, and incorporated-work deposits are skipped. Old
+peers reading a log with detached lines already behave correctly under
+the reader rules above — the representation has always been legal in a
+local store. A same-head `pull` keeps working on old servers too: the
+log suffix is simply empty there.
+
+`deposit` transfers original bytes only — a merge author's signed
+`merged` assertion stays distinct from independently verified original
+evidence, and `verify <id>` on a fresh clone checks the original
+Change against its own author's key, unchanged.
 
 ## 3. The parsers — the real work
 
