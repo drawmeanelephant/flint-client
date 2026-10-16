@@ -26,7 +26,10 @@ pub const MaxBatchChanges: usize = 256;
 pub const MaxWireLineBytes: usize = 4 * 1024 * 1024;
 pub const MaxStreams: usize = 256;
 pub const MaxWorkspaces: usize = 256;
-pub const MaxChangeBytes: usize = 1024 * 1024;
+/// Receive bound for one raw Change line. The documented per-line bound is
+/// 4 MiB (#60): a producer-valid Change can exceed 1 MiB, so clamping below
+/// `MaxWireLineBytes` rejects streams real flintd accepts.
+pub const MaxChangeBytes: usize = MaxWireLineBytes;
 
 /// Detail attached to `stale_head` refusals so a divergent push still points
 /// at the recovery journey instead of failing bare.
@@ -2582,6 +2585,14 @@ pub const InProcServer = struct {
                 }
                 if (b[0] == '\n') break;
                 line_buf.append(allocator, b[0]) catch return;
+                // Real flintd refuses request lines over 4 MiB with
+                // `store_too_large` and closes; mirror that bound so the
+                // fixture does not accept requests flintd would reject.
+                if (line_buf.items.len > MaxWireLineBytes) {
+                    w.writeAll("{\"seq\":0,\"ok\":false,\"refuse\":\"store_too_large\",\"detail\":\"line exceeds 4 MiB\"}\n") catch return;
+                    w.flush() catch return;
+                    return;
+                }
             }
             if (eof and line_buf.items.len == 0) break;
 
@@ -2717,4 +2728,127 @@ test "parseStreamValue: remote stream names must match [a-z0-9-]{1,32} (#52)" {
     var st = try parseStreamValue(gpa, good_parsed.value);
     defer st.deinit(gpa);
     try std.testing.expectEqualStrings("main-2", st.name);
+}
+
+test "sync bounds: a producer-valid >1 MiB change appends and reads back (#60)" {
+    const gpa = std.testing.allocator;
+    var arena_inst = std.heap.ArenaAllocator.init(gpa);
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+
+    var srv_mem = try fsys.MemFS.init(gpa);
+    defer srv_mem.deinit();
+    const srv_fs = srv_mem.fs();
+    try srv_fs.mkdir(gpa, "/srv/FLINT/streams");
+
+    var server = InProcServer{
+        .allocator = gpa,
+        .fs = srv_fs,
+        .store_root = "/srv/FLINT",
+    };
+
+    const transport = try InProcServer.dial(&server, gpa, std.testing.io, "tcp://127.0.0.1:4748");
+    var client = SyncClient.init(gpa, transport);
+    defer client.deinit();
+
+    const stream_id = "0199de2d-dc00-7000-8000-00000000aa60";
+    const record = store.Stream{ .id = stream_id, .name = "main", .created = 1 };
+    try client.create(record);
+
+    // 4096 const-atom adds — the shape a real `commit` emits at the documented
+    // 4096-Atom bound, signed like any other Change.
+    const ops = try arena.alloc(store.Op, 4096);
+    for (ops, 0..) |*op, i| {
+        const atom_id = try std.fmt.allocPrint(arena, "0199de2d-dc00-7000-8000-{d:0>12}", .{i});
+        const name = try std.fmt.allocPrint(arena, "main.item_{d:0>4}", .{i});
+        const hash = try std.fmt.allocPrint(arena, "{x:0>64}", .{i});
+        const sig_hash = try std.fmt.allocPrint(arena, "{x:0>64}", .{i +% 0x1000});
+        op.* = .{
+            .type = try arena.dupe(u8, "add"),
+            .atom_id = atom_id,
+            .kind = try arena.dupe(u8, "const"),
+            .new_name = name,
+            .new_span = .{ .file = try arena.dupe(u8, "main.zig"), .start = 0, .end = 32 },
+            .new_hash = hash,
+            .new_sig_hash = sig_hash,
+        };
+    }
+
+    var c = store.Change{
+        .id = "0199de2d-dc00-7000-8000-00000000cc60",
+        .stream = stream_id,
+        .ts = 1760000000000,
+        .author = "",
+        .message = "maximum-atoms",
+        .ops = ops,
+        .sig = "",
+    };
+    var seed = ed25519.parseHex32Lower("9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60").?;
+    try ed25519.signChangeWithSeed(arena, &c, &seed);
+
+    const marshaled = try json.marshalChangeLine(arena, c);
+    const raw_line = std.mem.trimEnd(u8, marshaled, "\r\n");
+
+    // Guard the premise: the signed Change exceeds the old 1 MiB clamp but
+    // stays under the documented 4 MiB per-line bound.
+    try std.testing.expect(raw_line.len > 1024 * 1024);
+    try std.testing.expect(raw_line.len + 1 <= MaxChangeBytes);
+
+    // The fixture's append path enforces the same per-change bound as real
+    // flintd — before this fix it refused the line the client just produced.
+    const new_head = try client.append(stream_id, null, &.{raw_line});
+    defer gpa.free(new_head);
+    try std.testing.expectEqualStrings(c.id, new_head);
+
+    // fetchAndVerifyStreamChanges is the clone/pull receive path: it must
+    // accept and verify the line rather than refusing `change_too_large`.
+    const fetched = try fetchAndVerifyStreamChanges(gpa, &client, record, null, null);
+    defer {
+        for (fetched) |l| gpa.free(l);
+        gpa.free(fetched);
+    }
+    try std.testing.expectEqual(@as(usize, 1), fetched.len);
+    try std.testing.expectEqualStrings(raw_line, fetched[0]);
+}
+
+test "change bound: a raw change line over the 4 MiB bound refuses change_too_large (#60)" {
+    const gpa = std.testing.allocator;
+
+    const OversizeRead = struct {
+        change_line: []const u8,
+
+        fn requestLineImpl(ptr: *anyopaque, allocator: Allocator, req_line: []const u8) anyerror![]u8 {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            _ = req_line;
+            var out: std.ArrayList(u8) = .empty;
+            errdefer out.deinit(allocator);
+            try out.appendSlice(allocator, "{\"seq\":1,\"ok\":true,\"head\":null,\"changes\":[");
+            try json.appendGoJSONString(&out, allocator, self.change_line);
+            try out.appendSlice(allocator, "],\"more\":false}");
+            return out.toOwnedSlice(allocator);
+        }
+
+        fn closeImpl(_: *anyopaque, _: Allocator) void {}
+    };
+
+    const oversized = try gpa.alloc(u8, MaxChangeBytes);
+    defer gpa.free(oversized);
+    @memset(oversized, 'x');
+
+    var stub = OversizeRead{ .change_line = oversized };
+    var client = SyncClient.init(gpa, .{
+        .ptr = &stub,
+        .vtable = &.{
+            .requestLine = OversizeRead.requestLineImpl,
+            .close = OversizeRead.closeImpl,
+        },
+    });
+    defer client.deinit();
+
+    const st = store.Stream{ .id = "x", .name = "main", .created = 0 };
+    try std.testing.expectError(
+        error.Refuse,
+        fetchAndVerifyStreamChanges(gpa, &client, st, null, null),
+    );
+    try std.testing.expectEqualStrings("change_too_large", fsys.last_refuse.code());
 }

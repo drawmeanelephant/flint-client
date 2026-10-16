@@ -304,3 +304,83 @@ test "pull refuses when the fetched suffix would push the log past 4 MiB (#59)" 
     defer gpa.free(log_after);
     try std.testing.expectEqualStrings(log_before, log_after);
 }
+
+test "maximum-atom commit pushes and clones: >1 MiB change under the 4 MiB line bound (#60)" {
+    const gpa = std.testing.allocator;
+
+    var srv_mem = try fsys.MemFS.init(gpa);
+    defer srv_mem.deinit();
+    const srv_fs = srv_mem.fs();
+    try srv_fs.mkdir(gpa, "/srv/FLINT/streams");
+
+    var server = sync.InProcServer{
+        .allocator = gpa,
+        .fs = srv_fs,
+        .store_root = "/srv/FLINT",
+    };
+
+    var ha = try TestHarness.init(gpa);
+    defer ha.deinit();
+    ha.env_sign_key = rfc8032_seed_hex;
+    ha.sync_dial = sync.InProcServer.dial;
+    ha.sync_dial_ctx = &server;
+    const fsa = ha.mem.fs();
+
+    // 4096 consts sits at the documented 4096-Atom bound; the signed Change
+    // lands above the old 1 MiB receive clamp but under the 4 MiB line bound.
+    var src: std.ArrayList(u8) = .empty;
+    defer src.deinit(gpa);
+    try src.appendSlice(gpa, "pub const alpha: u32 = 1;\npub const beta: u32 = 10;\n");
+    for (0..4094) |i| {
+        try src.print(gpa, "pub const item_{d:0>4}: u32 = {d};\n", .{ i, i });
+    }
+    try fsa.writeFileSafe(gpa, "/host/SRCA/main.zig", src.items);
+
+    for ([_][]const []const u8{
+        &.{ "init", "--name=a", "--src=/host/SRCA" },
+        &.{ "add", "/host/SRCA" },
+        &.{ "commit", "-m", "maximum-atoms" },
+        &.{ "push", "--remote=tcp://127.0.0.1:4748" },
+    }) |cmd| {
+        const res = try ha.runCmd(cmd);
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+    }
+
+    // Guard the premise: the pushed Change really exceeds the old 1 MiB clamp.
+    var idx_a = try store.loadStoreIndex(gpa, fsa, ha.root);
+    defer idx_a.deinit();
+    const main_id = idx_a.streamByName("main").?.id;
+    const log_p = try store.streamLogPath(gpa, ha.root, main_id);
+    defer gpa.free(log_p);
+    const log_bytes = try fsa.readFile(gpa, log_p, store.MaxFileReadBytes);
+    defer gpa.free(log_bytes);
+    try std.testing.expect(std.mem.endsWith(u8, log_bytes, "\n"));
+    try std.testing.expect(log_bytes.len - 1 > 1024 * 1024);
+    try std.testing.expect(log_bytes.len <= sync.MaxChangeBytes);
+
+    var hb = try TestHarness.init(gpa);
+    defer hb.deinit();
+    hb.env_sign_key = rfc8032_seed_hex;
+    hb.sync_dial = sync.InProcServer.dial;
+    hb.sync_dial_ctx = &server;
+
+    {
+        const res = try hb.runCmd(&.{
+            "clone",
+            "tcp://127.0.0.1:4748",
+            "--stream=main",
+            "--name=b",
+            "--src=/host/SRCB",
+        });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+        try std.testing.expectEqualStrings("flint: clone ok stream=main changes=1\n", res.out);
+    }
+    {
+        const vres = try hb.runCmd(&.{ "verify", "--all" });
+        defer gpa.free(vres.out);
+        try std.testing.expectEqual(@as(u8, 0), vres.rc);
+        try std.testing.expect(std.mem.indexOf(u8, vres.out, "sig: verified\n") != null);
+    }
+}
