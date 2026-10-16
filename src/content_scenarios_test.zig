@@ -237,6 +237,37 @@ test "checkout: two eras materialize independently and a forked snapshot does no
     }
 }
 
+test "checkout: bare fork head resolves through fork ancestry (#88)" {
+    const gpa = std.testing.allocator;
+    var h = try TestHarness.init(gpa);
+    defer h.deinit();
+    h.env_sign_key = rfc8032_seed_hex;
+    const mfs = h.mem.fs();
+
+    try mfs.writeFileSafe(gpa, "/host/src/a.zig", "pub fn a() void {}\n");
+    try runExpect(h, gpa, &.{ "init", "--name=w", "--src=/host/src" }, 0);
+    try runExpect(h, gpa, &.{ "add", "/host/src" }, 0);
+    try runExpect(h, gpa, &.{ "commit", "-m", "era1" }, 0);
+
+    // Bare fork: head = origin A, own log empty.
+    try runExpect(h, gpa, &.{ "fork", "main", "saved" }, 0);
+
+    // Advance main so `saved`'s head stays the inherited A.
+    try mfs.writeFileSafe(gpa, "/host/src/a.zig", "pub fn a() void {}\npub fn b() void {}\n");
+    try runExpect(h, gpa, &.{ "add", "/host/src" }, 0);
+    try runExpect(h, gpa, &.{ "commit", "-m", "era2" }, 0);
+
+    // The inherited head materializes A's snapshot via the origin stream's log.
+    try runExpect(h, gpa, &.{ "checkout", "--stream=saved", "--head", "--into=/host/out" }, 0);
+    try expectFileBytes(gpa, mfs, "/host/out/a.zig", "pub fn a() void {}\n");
+
+    // --ws resolution has the same ancestry lookup.
+    try mfs.writeFileSafe(gpa, "/host/srcb/x.txt", "x\n");
+    try runExpect(h, gpa, &.{ "init", "--name=b", "--src=/host/srcb", "--stream=saved" }, 0);
+    try runExpect(h, gpa, &.{ "checkout", "--ws=b", "--head", "--into=/host/out2" }, 0);
+    try expectFileBytes(gpa, mfs, "/host/out2/a.zig", "pub fn a() void {}\n");
+}
+
 test "checkout: content-only commits capture non-semantic changes and dedupe blobs" {
     const gpa = std.testing.allocator;
     var h = try TestHarness.init(gpa);
