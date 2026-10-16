@@ -5,28 +5,83 @@
   "duplicate_tokens": 100,
   "layers": {
     "foundation": {
-      "files": ["src/fsys.zig", "src/uuid.zig", "src/canon.zig"],
-      "may_import": ["foundation"]
+      "files": [
+        "src/fsys.zig",
+        "src/uuid.zig",
+        "src/canon.zig"
+      ],
+      "may_import": [
+        "foundation"
+      ]
     },
     "model": {
-      "files": ["src/store.zig", "src/json.zig", "src/ed25519.zig", "src/report.zig"],
-      "may_import": ["foundation", "model"]
+      "files": [
+        "src/store.zig",
+        "src/json.zig",
+        "src/ed25519.zig",
+        "src/report.zig"
+      ],
+      "may_import": [
+        "foundation",
+        "model"
+      ]
     },
     "parser": {
-      "files": ["src/parser/"],
-      "may_import": ["foundation", "model", "parser"]
+      "files": [
+        "src/parser/"
+      ],
+      "may_import": [
+        "foundation",
+        "model",
+        "parser"
+      ]
     },
     "operations": {
-      "files": ["src/workspace.zig", "src/sign.zig", "src/merge.zig", "src/release.zig", "src/content.zig"],
-      "may_import": ["foundation", "model", "parser", "operations"]
+      "files": [
+        "src/workspace.zig",
+        "src/sign.zig",
+        "src/merge.zig",
+        "src/release.zig",
+        "src/content.zig",
+        "src/handoff.zig"
+      ],
+      "may_import": [
+        "foundation",
+        "model",
+        "parser",
+        "operations"
+      ]
     },
     "sync": {
-      "files": ["src/sync.zig", "src/sync_content.zig"],
-      "may_import": ["foundation", "model", "operations", "sync"]
+      "files": [
+        "src/sync.zig",
+        "src/sync_content.zig"
+      ],
+      "may_import": [
+        "foundation",
+        "model",
+        "operations",
+        "sync"
+      ]
     },
     "cli": {
-      "files": ["src/main.zig", "src/json_dispatch.zig", "src/json_results_test.zig", "src/sync_scenarios_test.zig", "src/test_harness.zig", "src/content_scenarios_test.zig", "src/content_sync_test.zig"],
-      "may_import": ["foundation", "model", "parser", "operations", "sync", "cli"]
+      "files": [
+        "src/main.zig",
+        "src/json_dispatch.zig",
+        "src/json_results_test.zig",
+        "src/sync_scenarios_test.zig",
+        "src/test_harness.zig",
+        "src/content_scenarios_test.zig",
+        "src/content_sync_test.zig"
+      ],
+      "may_import": [
+        "foundation",
+        "model",
+        "parser",
+        "operations",
+        "sync",
+        "cli"
+      ]
     }
   }
 }

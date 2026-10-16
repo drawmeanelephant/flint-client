@@ -16,6 +16,7 @@ pub const merge = @import("merge.zig");
 pub const sync = @import("sync.zig");
 pub const release = @import("release.zig");
 pub const content = @import("content.zig");
+pub const handoff = @import("handoff.zig");
 pub const report = @import("report.zig");
 const jsond = @import("json_dispatch.zig");
 
@@ -332,7 +333,8 @@ pub fn runWithContext(ctx: Context, args: []const []const u8) u8 {
         std.mem.eql(u8, verb, "clone") or
         std.mem.eql(u8, verb, "push") or
         std.mem.eql(u8, verb, "pull") or
-        std.mem.eql(u8, verb, "checkout");
+        std.mem.eql(u8, verb, "checkout") or
+        std.mem.eql(u8, verb, "handoff");
 
     if (!is_known_store_verb) {
         if (rep_opt != null) return jsond.fail(rep_opt, fsys.refuse("usage", ""), &ctx);
@@ -374,6 +376,7 @@ test {
     _ = sync;
     _ = release;
     _ = content;
+    _ = handoff;
     _ = report;
     _ = @import("json_results_test.zig");
     _ = @import("sync_scenarios_test.zig");

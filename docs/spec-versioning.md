@@ -56,6 +56,7 @@ makes several protocol-visible changes still bumps once.
 | 3 | `deposit` op: detached Change lines in stream logs (store + wire contract, reader rules, push policy); `pull` reads the log suffix even when heads match; re-clone fast-forward compares id order | [#73](https://github.com/drawmeanelephant/flint-client/issues/73) |
 | 4 | `--json` result envelopes v1 (`docs/flint-json-results-spec.md`): one structured result per invocation for `status`, `add`, `commit`, `merge`, `push`, `pull`, `clone`, `verify` | [#79](https://github.com/drawmeanelephant/flint-client/issues/79) |
 | 5 | Snapshot content sync (`docs/flint-blobs-spec.md` §9): `push`/`pull`/`clone` use the `spec_rev >= 4` content ops `put_manifest`/`get_manifest`/`blob_put`/`blob_get` when announced; pre-content peers degrade to history-only with a `proto_version` detail | [#80](https://github.com/drawmeanelephant/flint-client/issues/80) |
+| 6 | Handoff records (`docs/flint-handoffs-spec.md`): `handoffs/<stream>.jsonl` store dir, `FLINT-HANDOFF/1`/`FLINT-HANDOFF-PACKET/1` formats, `handoff` verb family, `handoff_*` refusal names | [#81](https://github.com/drawmeanelephant/flint-client/issues/81) |
 
 ## 3. The `hello` `spec_rev` field
 

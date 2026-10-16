@@ -9,6 +9,7 @@ const workspace = @import("workspace.zig");
 const sign = @import("sign.zig");
 const merge = @import("merge.zig");
 const content = @import("content.zig");
+const handoff = @import("handoff.zig");
 const sync = @import("sync.zig");
 const ed25519 = @import("ed25519.zig");
 const uuid = @import("uuid.zig");
@@ -187,6 +188,13 @@ pub fn dispatchStoreVerb(
             ctx.stderr,
             sub,
         ) catch |err| {
+            return fail(rep, err, ctx);
+        };
+        return ok(rep, 0, ctx);
+    }
+
+    if (std.mem.eql(u8, verb, "handoff")) {
+        handoff.cmdHandoff(ctx.allocator, ctx.fs, root, uuid_gen, ctx.env_flint_sign_key, out_w, sub) catch |err| {
             return fail(rep, err, ctx);
         };
         return ok(rep, 0, ctx);
