@@ -2,6 +2,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const fsys = @import("fsys.zig");
 const store = @import("store.zig");
+const uuid = @import("uuid.zig");
 const ed25519 = @import("ed25519.zig");
 
 const hex_digits = "0123456789abcdef";
@@ -823,6 +824,585 @@ pub fn parseManifest(allocator: Allocator, line: []const u8) !store.Manifest {
         .author = author,
         .files = files,
         .sig = sig,
+    };
+}
+
+// ---------------------------------------------------------------------------
+// Handoff records (docs/flint-handoffs-spec.md §1)
+
+pub const handoff_format = "FLINT-HANDOFF/1";
+pub const MaxHandoffTextBytes: usize = 512;
+pub const MaxHandoffCommandBytes: usize = 1024;
+pub const MaxHandoffContextBytes: usize = 256;
+/// `snapshot` is an opaque reference until #77 fixes its shape; bounded so a
+/// record line stays well under the 64 KiB log bound.
+pub const MaxHandoffSnapshotBytes: usize = 1024;
+
+fn refuseHandoffMalformed(detail: []const u8) error{Refuse} {
+    return fsys.refuse("handoff_malformed", detail);
+}
+
+fn getRequiredStrDupe(allocator: Allocator, obj: std.json.ObjectMap, key: []const u8) ![]const u8 {
+    const v = obj.get(key) orelse return refuseHandoffMalformed(key);
+    return switch (v) {
+        .string => |s| allocator.dupe(u8, s),
+        else => refuseHandoffMalformed(key),
+    };
+}
+
+/// Reads an optional UUID field: absent or explicit `null` → `null`; a string
+/// must be canonical; anything else is malformed.
+fn getOptUUIDDupe(allocator: Allocator, obj: std.json.ObjectMap, key: []const u8) !?[]const u8 {
+    const v = obj.get(key) orelse return null;
+    return switch (v) {
+        .string => |s| blk: {
+            if (uuid.parseUUID(s) == null) return refuseHandoffMalformed(key);
+            break :blk try allocator.dupe(u8, s);
+        },
+        .null => null,
+        else => refuseHandoffMalformed(key),
+    };
+}
+
+/// Reads an optional free-text field bounded to `max` bytes of valid UTF-8.
+/// An explicit `null` or absent key yields `null`; empty strings are kept so
+/// per-kind requiredness can refuse them.
+fn getOptTextDupe(allocator: Allocator, obj: std.json.ObjectMap, key: []const u8, max: usize) !?[]const u8 {
+    const v = obj.get(key) orelse return null;
+    return switch (v) {
+        .string => |s| blk: {
+            if (s.len > max or !std.unicode.utf8ValidateSlice(s)) {
+                return refuseHandoffMalformed(key);
+            }
+            break :blk try allocator.dupe(u8, s);
+        },
+        .null => null,
+        else => refuseHandoffMalformed(key),
+    };
+}
+
+fn getRequiredTextDupe(allocator: Allocator, obj: std.json.ObjectMap, key: []const u8, min: usize, max: usize) ![]const u8 {
+    const v = obj.get(key) orelse return refuseHandoffMalformed(key);
+    return switch (v) {
+        .string => |s| blk: {
+            if (s.len < min or s.len > max or !std.unicode.utf8ValidateSlice(s)) {
+                return refuseHandoffMalformed(key);
+            }
+            break :blk try allocator.dupe(u8, s);
+        },
+        else => refuseHandoffMalformed(key),
+    };
+}
+
+fn getRequiredTs(obj: std.json.ObjectMap, key: []const u8) !i64 {
+    const v = obj.get(key) orelse return refuseHandoffMalformed(key);
+    return switch (v) {
+        .integer => |i| if (i <= 0) refuseHandoffMalformed(key) else i,
+        else => refuseHandoffMalformed(key),
+    };
+}
+
+fn requireHexField(s: []const u8, comptime n: usize, key: []const u8) !void {
+    if (ed25519.parseHexFixedLower(n, s) == null) {
+        return refuseHandoffMalformed(key);
+    }
+}
+
+fn parseHandoffValidationValue(allocator: Allocator, val: std.json.Value, lax: bool) !store.HandoffValidation {
+    if (val != .object) return refuseHandoffMalformed("validations");
+    const obj = val.object;
+
+    const command = try getRequiredTextDupe(allocator, obj, "command", 1, MaxHandoffCommandBytes);
+    errdefer allocator.free(command);
+
+    const result = try getRequiredStrDupe(allocator, obj, "result");
+    errdefer allocator.free(result);
+    if (store.handoffResultCode(result) == 0) return refuseHandoffMalformed("result");
+
+    const toolchain = try getOptTextDupe(allocator, obj, "toolchain", MaxHandoffContextBytes);
+    errdefer if (toolchain) |t| allocator.free(t);
+    const env = try getOptTextDupe(allocator, obj, "env", MaxHandoffContextBytes);
+    errdefer if (env) |e| allocator.free(e);
+
+    // `lax` (a --validations file, never a stored record) leaves attestor/ts
+    // for the writer to fill with the signing key and the current time.
+    var attestor: []const u8 = "";
+    errdefer if (attestor.len > 0) allocator.free(attestor);
+    if (lax) {
+        const a = try getOptTextDupe(allocator, obj, "attestor", MaxHandoffTextBytes);
+        if (a) |av| {
+            if (av.len > 0) {
+                try requireHexField(av, 32, "attestor");
+                attestor = av;
+            } else {
+                allocator.free(av);
+            }
+        }
+    } else {
+        attestor = try getRequiredStrDupe(allocator, obj, "attestor");
+        try requireHexField(attestor, 32, "attestor");
+    }
+
+    var ts: i64 = 0;
+    if (lax) {
+        if (obj.get("ts")) |tv| {
+            ts = switch (tv) {
+                .integer => |i| if (i <= 0) return refuseHandoffMalformed("ts") else i,
+                else => return refuseHandoffMalformed("ts"),
+            };
+        }
+    } else {
+        ts = try getRequiredTs(obj, "ts");
+    }
+
+    const evidence = try getOptTextDupe(allocator, obj, "evidence", MaxHandoffContextBytes);
+    errdefer if (evidence) |e| allocator.free(e);
+
+    return .{
+        .command = command,
+        .result = result,
+        .toolchain = toolchain orelse "",
+        .env = env orelse "",
+        .attestor = attestor,
+        .ts = ts,
+        .evidence = evidence orelse "",
+    };
+}
+
+fn parseHandoffScopeValue(allocator: Allocator, val: std.json.Value) !?store.HandoffScope {
+    if (val != .object) return refuseHandoffMalformed("scope");
+    const obj = val.object;
+
+    var paths: std.ArrayList([]const u8) = .empty;
+    errdefer {
+        for (paths.items) |p| allocator.free(p);
+        paths.deinit(allocator);
+    }
+    if (obj.get("paths")) |pv| {
+        if (pv != .array) return refuseHandoffMalformed("scope");
+        for (pv.array.items) |item| {
+            const s = switch (item) {
+                .string => |x| x,
+                else => return refuseHandoffMalformed("scope"),
+            };
+            if (!store.validManifestPath(s)) return refuseHandoffMalformed("scope");
+            try paths.append(allocator, try allocator.dupe(u8, s));
+        }
+    }
+
+    var atoms: std.ArrayList([]const u8) = .empty;
+    errdefer {
+        for (atoms.items) |a| allocator.free(a);
+        atoms.deinit(allocator);
+    }
+    if (obj.get("atoms")) |av| {
+        if (av != .array) return refuseHandoffMalformed("scope");
+        for (av.array.items) |item| {
+            const s = switch (item) {
+                .string => |x| x,
+                else => return refuseHandoffMalformed("scope"),
+            };
+            if (s.len == 0 or s.len > MaxHandoffTextBytes or !std.unicode.utf8ValidateSlice(s)) {
+                return refuseHandoffMalformed("scope");
+            }
+            try atoms.append(allocator, try allocator.dupe(u8, s));
+        }
+    }
+
+    // An empty object reads identically to an omitted field (§1.2).
+    if (paths.items.len == 0 and atoms.items.len == 0) {
+        return null;
+    }
+    return .{
+        .paths = try paths.toOwnedSlice(allocator),
+        .atoms = try atoms.toOwnedSlice(allocator),
+    };
+}
+
+fn requireAbsent(obj: std.json.ObjectMap, key: []const u8) !void {
+    if (obj.get(key)) |v| {
+        if (v != .null) return refuseHandoffMalformed(key);
+    }
+}
+
+/// Parses one `FLINT-HANDOFF/1` record line enforcing spec §1.5 rules 1–3
+/// (framing, per-kind requiredness and exclusivity, attestor equality).
+/// Violations refuse `handoff_malformed`; signature and lifecycle checks are
+/// the caller's job.
+pub fn parseHandoffRecord(allocator: Allocator, line: []const u8) !store.HandoffRecord {
+    if (std.mem.trim(u8, line, " \t\r\n").len == 0) {
+        return refuseHandoffMalformed("");
+    }
+    const parsed = std.json.parseFromSlice(std.json.Value, allocator, line, .{}) catch {
+        return refuseHandoffMalformed("");
+    };
+    defer parsed.deinit();
+    if (parsed.value != .object) return refuseHandoffMalformed("");
+    const obj = parsed.value.object;
+
+    const format = try getRequiredStrDupe(allocator, obj, "format");
+    defer allocator.free(format);
+    if (!std.mem.eql(u8, format, handoff_format)) {
+        return refuseHandoffMalformed("unknown format");
+    }
+
+    const id = try getRequiredStrDupe(allocator, obj, "id");
+    errdefer allocator.free(id);
+    if (uuid.parseUUID(id) == null) return refuseHandoffMalformed("id");
+    const handoff = try getRequiredStrDupe(allocator, obj, "handoff");
+    errdefer allocator.free(handoff);
+    if (uuid.parseUUID(handoff) == null) return refuseHandoffMalformed("handoff");
+
+    const kind = try getRequiredStrDupe(allocator, obj, "kind");
+    errdefer allocator.free(kind);
+    if (store.handoffKindCode(kind) == 0) return refuseHandoffMalformed("kind");
+
+    const stream = try getRequiredStrDupe(allocator, obj, "stream");
+    errdefer allocator.free(stream);
+    if (uuid.parseUUID(stream) == null) return refuseHandoffMalformed("stream");
+
+    const ts = try getRequiredTs(obj, "ts");
+
+    const author = try getRequiredStrDupe(allocator, obj, "author");
+    errdefer allocator.free(author);
+    try requireHexField(author, 32, "author");
+    const sig = try getRequiredStrDupe(allocator, obj, "sig");
+    errdefer allocator.free(sig);
+    try requireHexField(sig, 64, "sig");
+
+    const base = try getOptUUIDDupe(allocator, obj, "base");
+    errdefer if (base) |v| allocator.free(v);
+    const work = try getOptUUIDDupe(allocator, obj, "work");
+    errdefer if (work) |v| allocator.free(v);
+    const candidate = try getOptUUIDDupe(allocator, obj, "candidate");
+    errdefer if (candidate) |v| allocator.free(v);
+    const observed_head = try getOptUUIDDupe(allocator, obj, "observed_head");
+    errdefer if (observed_head) |v| allocator.free(v);
+    const replacement = try getOptUUIDDupe(allocator, obj, "replacement");
+    errdefer if (replacement) |v| allocator.free(v);
+
+    const snapshot = try getOptTextDupe(allocator, obj, "snapshot", MaxHandoffSnapshotBytes);
+    errdefer if (snapshot) |v| allocator.free(v);
+    const intent = try getOptTextDupe(allocator, obj, "intent", MaxHandoffTextBytes);
+    errdefer if (intent) |v| allocator.free(v);
+    const note = try getOptTextDupe(allocator, obj, "note", MaxHandoffTextBytes);
+    errdefer if (note) |v| allocator.free(v);
+
+    var scope: ?store.HandoffScope = null;
+    errdefer if (scope) |s| s.deinit(allocator);
+    if (obj.get("scope")) |sv| {
+        if (sv != .null) {
+            scope = try parseHandoffScopeValue(allocator, sv);
+        }
+    }
+
+    var validations: []store.HandoffValidation = &.{};
+    errdefer {
+        for (validations) |v| v.deinit(allocator);
+        if (validations.len > 0) allocator.free(validations);
+    }
+    if (obj.get("validations")) |vv| {
+        if (vv != .null) {
+            if (vv != .array) return refuseHandoffMalformed("validations");
+            if (vv.array.items.len > 0) {
+                var list = try allocator.alloc(store.HandoffValidation, vv.array.items.len);
+                var vi: usize = 0;
+                errdefer {
+                    for (list[0..vi]) |v| v.deinit(allocator);
+                    allocator.free(list);
+                }
+                while (vi < vv.array.items.len) : (vi += 1) {
+                    list[vi] = try parseHandoffValidationValue(allocator, vv.array.items[vi], false);
+                }
+                validations = list;
+            }
+        }
+    }
+
+    // §1.5 rule 2 — per-kind required fields and exclusivity.
+    const is_propose = std.mem.eql(u8, kind, "propose");
+    const is_attest = std.mem.eql(u8, kind, "attest");
+    const is_accept = std.mem.eql(u8, kind, "accept");
+    const is_supersede = std.mem.eql(u8, kind, "supersede");
+    if (is_propose != std.mem.eql(u8, id, handoff)) {
+        return refuseHandoffMalformed("handoff");
+    }
+    if (is_propose) {
+        if (base == null or work == null or candidate == null) {
+            return refuseHandoffMalformed("missing required field");
+        }
+        if (intent == null or intent.?.len == 0) {
+            return refuseHandoffMalformed("intent");
+        }
+        try requireAbsent(obj, "observed_head");
+        try requireAbsent(obj, "replacement");
+        try requireAbsent(obj, "note");
+    } else if (is_attest) {
+        if (candidate == null) return refuseHandoffMalformed("candidate");
+        if (validations.len != 1) return refuseHandoffMalformed("validations");
+        try requireAbsent(obj, "base");
+        try requireAbsent(obj, "work");
+        try requireAbsent(obj, "intent");
+        try requireAbsent(obj, "note");
+        try requireAbsent(obj, "scope");
+        try requireAbsent(obj, "observed_head");
+        try requireAbsent(obj, "replacement");
+    } else if (is_accept) {
+        if (candidate == null or observed_head == null) {
+            return refuseHandoffMalformed("missing required field");
+        }
+        try requireAbsent(obj, "base");
+        try requireAbsent(obj, "work");
+        try requireAbsent(obj, "snapshot");
+        try requireAbsent(obj, "intent");
+        try requireAbsent(obj, "scope");
+        try requireAbsent(obj, "validations");
+        try requireAbsent(obj, "replacement");
+    } else if (is_supersede) {
+        if (candidate == null) return refuseHandoffMalformed("candidate");
+        try requireAbsent(obj, "base");
+        try requireAbsent(obj, "work");
+        try requireAbsent(obj, "snapshot");
+        try requireAbsent(obj, "intent");
+        try requireAbsent(obj, "scope");
+        try requireAbsent(obj, "validations");
+        try requireAbsent(obj, "observed_head");
+    } else {
+        // withdraw: carries no ids, only an optional note.
+        try requireAbsent(obj, "base");
+        try requireAbsent(obj, "work");
+        try requireAbsent(obj, "candidate");
+        try requireAbsent(obj, "snapshot");
+        try requireAbsent(obj, "intent");
+        try requireAbsent(obj, "scope");
+        try requireAbsent(obj, "validations");
+        try requireAbsent(obj, "observed_head");
+        try requireAbsent(obj, "replacement");
+    }
+
+    // §1.5 rule 3 — every embedded attestor equals the record author.
+    for (validations) |v| {
+        if (!std.mem.eql(u8, v.attestor, author)) {
+            return refuseHandoffMalformed("attestor mismatch");
+        }
+    }
+
+    var rec = store.HandoffRecord{
+        .id = id,
+        .handoff = handoff,
+        .kind = kind,
+        .stream = stream,
+        .ts = ts,
+        .author = author,
+        .sig = sig,
+        .base = base,
+        .work = work,
+        .candidate = candidate,
+        .snapshot = snapshot,
+        .intent = intent,
+        .note = note,
+        .scope = scope,
+        .validations = validations,
+        .observed_head = observed_head,
+        .replacement = replacement,
+    };
+    // §1.2 — empty strings read identically to omitted fields.
+    if (rec.snapshot) |v| {
+        if (v.len == 0) {
+            allocator.free(v);
+            rec.snapshot = null;
+        }
+    }
+    if (rec.note) |v| {
+        if (v.len == 0) {
+            allocator.free(v);
+            rec.note = null;
+        }
+    }
+    return rec;
+}
+
+fn appendHandoffValidation(out: *std.ArrayList(u8), allocator: Allocator, v: store.HandoffValidation) !void {
+    try out.appendSlice(allocator, "{\"command\":");
+    try appendGoJSONString(out, allocator, v.command);
+    try out.appendSlice(allocator, ",\"result\":");
+    try appendGoJSONString(out, allocator, v.result);
+    if (v.toolchain.len > 0) {
+        try out.appendSlice(allocator, ",\"toolchain\":");
+        try appendGoJSONString(out, allocator, v.toolchain);
+    }
+    if (v.env.len > 0) {
+        try out.appendSlice(allocator, ",\"env\":");
+        try appendGoJSONString(out, allocator, v.env);
+    }
+    try out.appendSlice(allocator, ",\"attestor\":");
+    try appendGoJSONString(out, allocator, v.attestor);
+    try out.appendSlice(allocator, ",\"ts\":");
+    try appendInt64(out, allocator, v.ts);
+    if (v.evidence.len > 0) {
+        try out.appendSlice(allocator, ",\"evidence\":");
+        try appendGoJSONString(out, allocator, v.evidence);
+    }
+    try out.append(allocator, '}');
+}
+
+fn strLessThan(_: void, a: []const u8, b: []const u8) bool {
+    return std.mem.lessThan(u8, a, b);
+}
+
+fn appendHandoffScope(out: *std.ArrayList(u8), allocator: Allocator, scope: store.HandoffScope) !void {
+    const paths = try allocator.dupe([]const u8, scope.paths);
+    defer allocator.free(paths);
+    std.mem.sort([]const u8, paths, {}, strLessThan);
+    const atoms = try allocator.dupe([]const u8, scope.atoms);
+    defer allocator.free(atoms);
+    std.mem.sort([]const u8, atoms, {}, strLessThan);
+
+    try out.appendSlice(allocator, "{\"paths\":[");
+    for (paths, 0..) |p, i| {
+        if (i > 0) try out.append(allocator, ',');
+        try appendGoJSONString(out, allocator, p);
+    }
+    try out.appendSlice(allocator, "],\"atoms\":[");
+    for (atoms, 0..) |a, i| {
+        if (i > 0) try out.append(allocator, ',');
+        try appendGoJSONString(out, allocator, a);
+    }
+    try out.appendSlice(allocator, "]}");
+}
+
+/// Serializes a handoff record as one JSON line in the spec §1 field order —
+/// envelope fields first (`sig` included), then payload fields — with
+/// trailing `\n`. Absent optionals are never emitted.
+pub fn marshalHandoffRecord(allocator: Allocator, r: store.HandoffRecord) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+
+    try out.appendSlice(allocator, "{\"format\":");
+    try appendGoJSONString(&out, allocator, handoff_format);
+    try out.appendSlice(allocator, ",\"id\":");
+    try appendGoJSONString(&out, allocator, r.id);
+    try out.appendSlice(allocator, ",\"handoff\":");
+    try appendGoJSONString(&out, allocator, r.handoff);
+    try out.appendSlice(allocator, ",\"kind\":");
+    try appendGoJSONString(&out, allocator, r.kind);
+    try out.appendSlice(allocator, ",\"stream\":");
+    try appendGoJSONString(&out, allocator, r.stream);
+    try out.appendSlice(allocator, ",\"ts\":");
+    try appendInt64(&out, allocator, r.ts);
+    try out.appendSlice(allocator, ",\"author\":");
+    try appendGoJSONString(&out, allocator, r.author);
+    try out.appendSlice(allocator, ",\"sig\":");
+    try appendGoJSONString(&out, allocator, r.sig);
+
+    if (r.base) |v| {
+        try out.appendSlice(allocator, ",\"base\":");
+        try appendGoJSONString(&out, allocator, v);
+    }
+    if (r.work) |v| {
+        try out.appendSlice(allocator, ",\"work\":");
+        try appendGoJSONString(&out, allocator, v);
+    }
+    if (r.candidate) |v| {
+        try out.appendSlice(allocator, ",\"candidate\":");
+        try appendGoJSONString(&out, allocator, v);
+    }
+    if (r.snapshot) |v| {
+        try out.appendSlice(allocator, ",\"snapshot\":");
+        try appendGoJSONString(&out, allocator, v);
+    }
+    if (r.intent) |v| {
+        try out.appendSlice(allocator, ",\"intent\":");
+        try appendGoJSONString(&out, allocator, v);
+    }
+    if (r.note) |v| {
+        try out.appendSlice(allocator, ",\"note\":");
+        try appendGoJSONString(&out, allocator, v);
+    }
+    if (r.scope) |s| {
+        try out.appendSlice(allocator, ",\"scope\":");
+        try appendHandoffScope(&out, allocator, s);
+    }
+    if (r.validations.len > 0) {
+        try out.appendSlice(allocator, ",\"validations\":[");
+        for (r.validations, 0..) |v, i| {
+            if (i > 0) try out.append(allocator, ',');
+            try appendHandoffValidation(&out, allocator, v);
+        }
+        try out.append(allocator, ']');
+    }
+    if (r.observed_head) |v| {
+        try out.appendSlice(allocator, ",\"observed_head\":");
+        try appendGoJSONString(&out, allocator, v);
+    }
+    if (r.replacement) |v| {
+        try out.appendSlice(allocator, ",\"replacement\":");
+        try appendGoJSONString(&out, allocator, v);
+    }
+    try out.appendSlice(allocator, "}\n");
+
+    return out.toOwnedSlice(allocator);
+}
+
+/// Parses a `--scope-file` document (`{"paths":[…],"atoms":[…]}`) — absent or
+/// empty reads as no scope claim (§1.2).
+pub fn parseHandoffScopeDoc(allocator: Allocator, data: []const u8) !?store.HandoffScope {
+    const parsed = std.json.parseFromSlice(std.json.Value, allocator, data, .{}) catch {
+        return refuseHandoffMalformed("scope");
+    };
+    defer parsed.deinit();
+    return try parseHandoffScopeValue(allocator, parsed.value);
+}
+
+/// Parses a `--validations` document — a JSON array of §1.3 objects. Entries
+/// may omit `attestor`/`ts`; the writer fills them with the signer and now.
+pub fn parseHandoffValidationsDoc(allocator: Allocator, data: []const u8) ![]store.HandoffValidation {
+    const parsed = std.json.parseFromSlice(std.json.Value, allocator, data, .{}) catch {
+        return refuseHandoffMalformed("validations");
+    };
+    defer parsed.deinit();
+    if (parsed.value != .array) return refuseHandoffMalformed("validations");
+
+    var list = try allocator.alloc(store.HandoffValidation, parsed.value.array.items.len);
+    var i: usize = 0;
+    errdefer {
+        for (list[0..i]) |v| v.deinit(allocator);
+        allocator.free(list);
+    }
+    while (i < parsed.value.array.items.len) : (i += 1) {
+        list[i] = try parseHandoffValidationValue(allocator, parsed.value.array.items[i], true);
+    }
+    return list;
+}
+
+/// Peeks a log line's `format` field without validating the record: returns
+/// the format string (allocated), `null` when the line carries no string
+/// `format`, or an error when the line is not a JSON object at all.
+pub fn peekHandoffFormat(allocator: Allocator, line: []const u8) !?[]u8 {
+    const parsed = std.json.parseFromSlice(std.json.Value, allocator, line, .{}) catch {
+        return error.InvalidJsonField;
+    };
+    defer parsed.deinit();
+    if (parsed.value != .object) return error.InvalidJsonField;
+    const v = parsed.value.object.get("format") orelse return null;
+    return switch (v) {
+        .string => |s| try allocator.dupe(u8, s),
+        else => null,
+    };
+}
+
+/// Extracts a best-effort `handoff` field from a line that may not validate —
+/// used to attribute invalid records to a proposal during inspection.
+pub fn peekHandoffField(allocator: Allocator, line: []const u8, key: []const u8) !?[]u8 {
+    const parsed = std.json.parseFromSlice(std.json.Value, allocator, line, .{}) catch {
+        return error.InvalidJsonField;
+    };
+    defer parsed.deinit();
+    if (parsed.value != .object) return error.InvalidJsonField;
+    const v = parsed.value.object.get(key) orelse return null;
+    return switch (v) {
+        .string => |s| try allocator.dupe(u8, s),
+        else => null,
     };
 }
 

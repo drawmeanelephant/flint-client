@@ -249,6 +249,184 @@ pub fn verifySig(sig_bytes: [64]u8, msg: []const u8, author_bytes: [32]u8) bool 
     return true;
 }
 
+/// Handoff record signing domains (docs/flint-handoffs-spec.md §1.4) —
+/// deliberately disjoint from `sig_msg`: a handoff record is never a Change.
+pub const domain_handoff = "FLINT-HANDOFF/1\x00";
+pub const domain_handoff_scope = "FLINT-HANDOFF-SCOPE/1\x00";
+pub const domain_handoff_vals = "FLINT-HANDOFF-VALS/1\x00";
+
+fn writeOptFieldUUID(buf: *std.ArrayList(u8), allocator: Allocator, u: ?[]const u8) !void {
+    if (u == null) {
+        try buf.append(allocator, 0x00);
+        return;
+    }
+    const id = uuid.parseUUID(u.?) orelse return fsys.refuse("handoff_malformed", "");
+    try buf.append(allocator, 0x01);
+    try buf.appendSlice(allocator, &id);
+}
+
+fn handoffScopeHash(allocator: Allocator, scope: store.HandoffScope) ![32]u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+
+    const paths = try allocator.dupe([]const u8, scope.paths);
+    defer allocator.free(paths);
+    std.mem.sort([]const u8, paths, {}, struct {
+        fn lt(_: void, a: []const u8, b: []const u8) bool {
+            return std.mem.lessThan(u8, a, b);
+        }
+    }.lt);
+    const atoms = try allocator.dupe([]const u8, scope.atoms);
+    defer allocator.free(atoms);
+    std.mem.sort([]const u8, atoms, {}, struct {
+        fn lt(_: void, a: []const u8, b: []const u8) bool {
+            return std.mem.lessThan(u8, a, b);
+        }
+    }.lt);
+
+    try writeU32LE(&buf, allocator, @intCast(paths.len));
+    for (paths) |p| try writeStr(&buf, allocator, p);
+    try writeU32LE(&buf, allocator, @intCast(atoms.len));
+    for (atoms) |a| try writeStr(&buf, allocator, a);
+
+    var digest: [32]u8 = undefined;
+    Sha256.hash(buf.items, &digest, .{});
+    return digest;
+}
+
+fn handoffValsHash(allocator: Allocator, vals: []const store.HandoffValidation) ![32]u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+
+    try writeU32LE(&buf, allocator, @intCast(vals.len));
+    for (vals) |v| {
+        const rcode = store.handoffResultCode(v.result);
+        if (rcode == 0) return fsys.refuse("handoff_malformed", "");
+        const attestor = parseHex32Lower(v.attestor) orelse {
+            return fsys.refuse("handoff_malformed", "");
+        };
+        if (v.ts < 0) return fsys.refuse("handoff_malformed", "");
+        try writeStr(&buf, allocator, v.command);
+        try buf.append(allocator, rcode);
+        try writeOptStr(&buf, allocator, v.toolchain);
+        try writeOptStr(&buf, allocator, v.env);
+        try buf.appendSlice(allocator, &attestor);
+        try writeU64LE(&buf, allocator, @intCast(v.ts));
+        try writeOptStr(&buf, allocator, v.evidence);
+    }
+
+    var digest: [32]u8 = undefined;
+    Sha256.hash(buf.items, &digest, .{});
+    return digest;
+}
+
+/// handoffMsg computes the canonical record preimage per
+/// docs/flint-handoffs-spec.md §1.4:
+/// "FLINT-HANDOFF/1\x00" || id[16] || handoff[16] || u8(kind) || stream[16]
+/// || u64le(ts) || author[32] || opt(base) || opt(work) || opt(candidate)
+/// || opt(observed_head) || opt(replacement) || opt(str(snapshot))
+/// || opt(str(intent)) || opt(str(note)) || opt(scope_hash) || opt(vals_hash)
+pub fn handoffMsg(allocator: Allocator, r: *const store.HandoffRecord) ![]u8 {
+    const kind_code = store.handoffKindCode(r.kind);
+    if (kind_code == 0) {
+        return fsys.refuse("handoff_malformed", "");
+    }
+    const id_bytes = uuid.parseUUID(r.id) orelse return fsys.refuse("handoff_malformed", "");
+    const handoff_bytes = uuid.parseUUID(r.handoff) orelse return fsys.refuse("handoff_malformed", "");
+    const stream_bytes = uuid.parseUUID(r.stream) orelse return fsys.refuse("handoff_malformed", "");
+    if (r.ts <= 0) return fsys.refuse("handoff_malformed", "");
+    const author_bytes = parseHex32Lower(r.author) orelse return fsys.refuse("handoff_malformed", "");
+
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+
+    try buf.appendSlice(allocator, domain_handoff);
+    try buf.appendSlice(allocator, &id_bytes);
+    try buf.appendSlice(allocator, &handoff_bytes);
+    try buf.append(allocator, kind_code);
+    try buf.appendSlice(allocator, &stream_bytes);
+    try writeU64LE(&buf, allocator, @intCast(r.ts));
+    try buf.appendSlice(allocator, &author_bytes);
+
+    try writeOptFieldUUID(&buf, allocator, r.base);
+    try writeOptFieldUUID(&buf, allocator, r.work);
+    try writeOptFieldUUID(&buf, allocator, r.candidate);
+    try writeOptFieldUUID(&buf, allocator, r.observed_head);
+    try writeOptFieldUUID(&buf, allocator, r.replacement);
+
+    if (r.snapshot) |s| {
+        try buf.append(allocator, 0x01);
+        try writeStr(&buf, allocator, s);
+    } else {
+        try buf.append(allocator, 0x00);
+    }
+    if (r.intent) |s| {
+        try buf.append(allocator, 0x01);
+        try writeStr(&buf, allocator, s);
+    } else {
+        try buf.append(allocator, 0x00);
+    }
+    if (r.note) |s| {
+        try buf.append(allocator, 0x01);
+        try writeStr(&buf, allocator, s);
+    } else {
+        try buf.append(allocator, 0x00);
+    }
+
+    if (r.scope) |s| {
+        const sh = try handoffScopeHash(allocator, s);
+        try buf.append(allocator, 0x01);
+        try buf.appendSlice(allocator, &sh);
+    } else {
+        try buf.append(allocator, 0x00);
+    }
+    if (r.validations.len > 0) {
+        const vh = try handoffValsHash(allocator, r.validations);
+        try buf.append(allocator, 0x01);
+        try buf.appendSlice(allocator, &vh);
+    } else {
+        try buf.append(allocator, 0x00);
+    }
+
+    return buf.toOwnedSlice(allocator);
+}
+
+/// signHandoffRecord sets r.author from derivePublic(seed), computes
+/// handoff_msg, sets r.sig, and wipes the caller's seed buffer.
+pub fn signHandoffRecord(allocator: Allocator, r: *store.HandoffRecord, seed: *[32]u8) !void {
+    defer std.crypto.secureZero(u8, seed);
+
+    const pub_bytes = try derivePublic(seed.*);
+    const pub_hex = encodeHexFixedLower(32, pub_bytes);
+    const new_author = try allocator.dupe(u8, &pub_hex);
+    allocator.free(r.author);
+    r.author = new_author;
+
+    const msg = try handoffMsg(allocator, r);
+    defer allocator.free(msg);
+
+    const sig_bytes = try signMsg(msg, seed.*);
+    const sig_hex = encodeHexFixedLower(64, sig_bytes);
+    const new_sig = try allocator.dupe(u8, &sig_hex);
+    allocator.free(r.sig);
+    r.sig = new_sig;
+}
+
+/// verifyHandoff recomputes handoff_msg and checks r.sig against r.author.
+/// Field-level failures refuse `handoff_malformed`; a clean signature miss
+/// returns `false` (callers map it to `sig_invalid` or an `invalid` verdict).
+pub fn verifyHandoff(allocator: Allocator, r: *const store.HandoffRecord) !bool {
+    const msg = try handoffMsg(allocator, r);
+    defer allocator.free(msg);
+    const author = parseHex32Lower(r.author) orelse {
+        return fsys.refuse("handoff_malformed", "");
+    };
+    const sig = parseHex64Lower(r.sig) orelse {
+        return fsys.refuse("handoff_malformed", "");
+    };
+    return verifySig(sig, msg, author);
+}
+
 /// manifestSigMsg computes the manifest signature preimage:
 /// `"flint-manifest-v1\n" || canonical(<stream,change,author,files>)` where
 /// canonical is the Go-marshaled manifest object with `sig` excluded.

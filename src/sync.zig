@@ -20,7 +20,7 @@ pub const ProtoVersion = "FLINT-SYNC/1";
 /// the repo-root `SPECREV` file — `tools/tests/test_specrev.py` enforces
 /// the match. Bump rules and the downstream-pinning convention live in
 /// `docs/spec-versioning.md`.
-pub const SpecRev: u32 = 5;
+pub const SpecRev: u32 = 6;
 
 pub const AuthDomain = "FLINT-SYNC-AUTH/1\x00";
 pub const DefaultReadLimit: usize = 256;
