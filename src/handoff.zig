@@ -454,6 +454,12 @@ fn scopeVerdict(
 /// reference — a UUID names the manifest bound to that Change on the `work`
 /// stream's log; `null` means explicitly content-degraded (still `ready`-able);
 /// an unresolvable reference or missing manifest/blobs reports `incomplete`.
+///
+/// Presence is not proof: like checkout's preflight, the manifest's
+/// stream/change binding and author must match the signed Change, both the
+/// Change and manifest signatures must verify, and every required blob's
+/// bytes must hash to its id. Anything less reports `incomplete` so a corrupt
+/// or unauthenticated snapshot can never read `ready` (#96).
 fn contentComplete(allocator: Allocator, fs: FS, root: []const u8, work: ?[]const u8, snapshot: ?[]const u8) !bool {
     const snap = snapshot orelse return true;
     const work_id = work orelse return false;
@@ -462,11 +468,33 @@ fn contentComplete(allocator: Allocator, fs: FS, root: []const u8, work: ?[]cons
     const manifests = try store.loadManifests(allocator, fs, root, work_id);
     defer store.freeManifests(allocator, manifests);
     const m = store.manifestForChange(manifests, snap) orelse return false;
+    if (!std.mem.eql(u8, m.stream, work_id) or !std.mem.eql(u8, m.change, snap)) {
+        return false;
+    }
+
+    const changes = try store.readStreamChanges(allocator, fs, root, work_id);
+    defer store.freeChanges(allocator, changes);
+    var bound: ?*const store.Change = null;
+    for (changes) |*c| {
+        if (std.mem.eql(u8, c.id, snap)) bound = c;
+    }
+    const bc = bound orelse return false;
+    if (!std.mem.eql(u8, m.author, bc.author)) return false;
+    const change_ok = ed25519.verifyChange(allocator, bc) catch return false;
+    if (!change_ok) return false;
+    const manifest_ok = ed25519.verifyManifest(allocator, m.*) catch return false;
+    if (!manifest_ok) return false;
+
     for (m.files) |e| {
         if (e.blob.len == 0) return false;
         const bp = try store.blobPath(allocator, root, e.blob);
         defer allocator.free(bp);
-        if (!fs.exists(allocator, bp)) return false;
+        const data = fs.readFile(allocator, bp, store.MaxBlobBytes) catch return false;
+        defer allocator.free(data);
+        var digest: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(data, &digest, .{});
+        const hex = std.fmt.bytesToHex(digest, .lower);
+        if (!std.mem.eql(u8, &hex, e.blob)) return false;
     }
     return true;
 }

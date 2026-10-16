@@ -1134,3 +1134,93 @@ fn countOccurrences(haystack: []const u8, needle: []const u8) usize {
     }
     return n;
 }
+
+test "handoff: inspect verdict authenticates the snapshot — corrupt blob or manifest sig is not ready (#96)" {
+    const gpa = std.testing.allocator;
+    var h = try TestHarness.init(gpa);
+    defer h.deinit();
+    h.env_sign_key = rfc8032_seed_hex;
+    const mfs = h.mem.fs();
+
+    const base = try setupTwoStreams(h, gpa, mfs);
+    defer gpa.free(base);
+    const wsid = try streamIdByName(gpa, mfs, h.root, "a-work");
+    defer gpa.free(wsid);
+
+    const p_out = try runOut(h, gpa, &.{
+        "handoff", "propose", "--stream=main", "--work=a-work", "-m", "review",
+    }, 0);
+    defer gpa.free(p_out);
+    const hid = try handoffId(gpa, p_out);
+    defer gpa.free(hid);
+
+    const inspectVerdict = struct {
+        fn get(hh: *TestHarness, a: Allocator, id: []const u8) ![]const u8 {
+            const out = try runOut(hh, a, &.{ "handoff", "inspect", id }, 0);
+            defer a.free(out);
+            const needle = "verdict=";
+            const at = std.mem.indexOf(u8, out, needle).?;
+            const rest = out[at + needle.len ..];
+            const end = std.mem.indexOfAny(u8, rest, " \n").?;
+            return try a.dupe(u8, rest[0..end]);
+        }
+    }.get;
+
+    // Baseline: the valid snapshot reads ready.
+    const v0 = try inspectVerdict(h, gpa, hid);
+    defer gpa.free(v0);
+    try std.testing.expectEqualStrings("ready", v0);
+
+    // The work stream's manifest binds candidate → blob ids.
+    const mpath = try std.fmt.allocPrint(gpa, "{s}/manifests/{s}.jsonl", .{ h.root, wsid });
+    defer gpa.free(mpath);
+    const mraw = try mfs.readFile(gpa, mpath, store.MaxFileReadBytes);
+    defer gpa.free(mraw);
+    const m = try json.parseManifest(gpa, mraw[0 .. mraw.len - 1]);
+    defer m.deinit(gpa);
+    const entry = m.files[0];
+    try std.testing.expect(entry.blob.len == 64);
+    const bp = try store.blobPath(gpa, h.root, entry.blob);
+    defer gpa.free(bp);
+    const orig_blob = try mfs.readFile(gpa, bp, store.MaxBlobBytes);
+    defer gpa.free(orig_blob);
+
+    // Corrupt blob bytes under the original content-id: presence stays true,
+    // the hash fails — verdict must drop to incomplete, not ready.
+    try mfs.writeFileSafe(gpa, bp, "corrupt synthetic snapshot\n");
+    const v1 = try inspectVerdict(h, gpa, hid);
+    defer gpa.free(v1);
+    try std.testing.expectEqualStrings("incomplete", v1);
+
+    // Restore: ready again — no cache, verdict re-derives from bytes.
+    try mfs.writeFileSafe(gpa, bp, orig_blob);
+    const v2 = try inspectVerdict(h, gpa, hid);
+    defer gpa.free(v2);
+    try std.testing.expectEqualStrings("ready", v2);
+
+    // Missing blob entirely: also incomplete.
+    try mfs.remove(gpa, bp);
+    const v3 = try inspectVerdict(h, gpa, hid);
+    defer gpa.free(v3);
+    try std.testing.expectEqualStrings("incomplete", v3);
+    try mfs.writeFileSafe(gpa, bp, orig_blob);
+    const v4 = try inspectVerdict(h, gpa, hid);
+    defer gpa.free(v4);
+    try std.testing.expectEqualStrings("ready", v4);
+
+    // Flip one hex digit of the manifest's signature: presence and entries
+    // intact, authentication fails — incomplete.
+    var tampered = try gpa.dupe(u8, mraw);
+    defer gpa.free(tampered);
+    const sig_pos = std.mem.lastIndexOfScalar(u8, tampered, '"').? - 2;
+    tampered[sig_pos] = if (tampered[sig_pos] == '0') '1' else '0';
+    try mfs.writeFileSafe(gpa, mpath, tampered);
+    const v5 = try inspectVerdict(h, gpa, hid);
+    defer gpa.free(v5);
+    try std.testing.expectEqualStrings("incomplete", v5);
+
+    try mfs.writeFileSafe(gpa, mpath, mraw);
+    const v6 = try inspectVerdict(h, gpa, hid);
+    defer gpa.free(v6);
+    try std.testing.expectEqualStrings("ready", v6);
+}
