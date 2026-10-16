@@ -270,23 +270,44 @@ pub fn hasUnmaterializedMergeMarks(atoms: []const store.StoredAtom) bool {
     return false;
 }
 
-fn readBlobVerified(allocator: Allocator, fs: FS, root_abs: []const u8, hex_id: []const u8, path: []const u8) ![]u8 {
+/// BlobCheck is the non-refusing shape of the blob verification below:
+/// `ok` carries the verified bytes (caller frees); `missing`/`malformed`
+/// are the read-only counterparts of `blob_missing`/`blob_malformed` for
+/// verdict paths that must report rather than refuse.
+pub const BlobCheck = union(enum) {
+    ok: []u8,
+    missing,
+    malformed,
+};
+
+/// Reads the blob named `hex_id` and re-verifies its bytes against the
+/// SHA-256 content id — the shared authentication half of checkout's
+/// all-or-nothing materialization.
+pub fn checkBlobContent(allocator: Allocator, fs: FS, root_abs: []const u8, hex_id: []const u8) !BlobCheck {
     const bp = try store.blobPath(allocator, root_abs, hex_id);
     defer allocator.free(bp);
     const data = fs.readFile(allocator, bp, store.MaxBlobBytes) catch |err| {
         if (err == error.FileNotFound) {
-            return fsys.refuse("blob_missing", path);
+            return .missing;
         }
         return err;
     };
-    errdefer allocator.free(data);
     var digest: [32]u8 = undefined;
     Sha256.hash(data, &digest, .{});
     const hex = std.fmt.bytesToHex(digest, .lower);
     if (!std.mem.eql(u8, &hex, hex_id)) {
-        return fsys.refuse("blob_malformed", path);
+        allocator.free(data);
+        return .malformed;
     }
-    return data;
+    return .{ .ok = data };
+}
+
+fn readBlobVerified(allocator: Allocator, fs: FS, root_abs: []const u8, hex_id: []const u8, path: []const u8) ![]u8 {
+    switch (try checkBlobContent(allocator, fs, root_abs, hex_id)) {
+        .ok => |data| return data,
+        .missing => return fsys.refuse("blob_missing", path),
+        .malformed => return fsys.refuse("blob_malformed", path),
+    }
 }
 
 fn findChange(changes: []const store.Change, id: []const u8) ?*const store.Change {

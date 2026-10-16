@@ -15,6 +15,7 @@ const uuid = @import("uuid.zig");
 const ed25519 = @import("ed25519.zig");
 const merge = @import("merge.zig");
 const report = @import("report.zig");
+const content = @import("content.zig");
 
 const packet_format = "FLINT-HANDOFF-PACKET/1";
 
@@ -450,25 +451,62 @@ fn scopeVerdict(
     return "honest";
 }
 
+/// The §5 `ready` verdict's content leg outcome: `verified` means the bound
+/// snapshot authenticates end to end; `incomplete` means required content is
+/// unavailable; `invalid` means the claim's content fails authentication —
+/// signature, binding, framing, or a blob id that does not match its bytes.
+const ContentLeg = enum { verified, incomplete, invalid };
+
 /// The §5 `ready` verdict's content leg: `snapshot` is the opaque #77-era
 /// reference — a UUID names the manifest bound to that Change on the `work`
-/// stream's log; `null` means explicitly content-degraded (still `ready`-able);
-/// an unresolvable reference or missing manifest/blobs reports `incomplete`.
-fn contentComplete(allocator: Allocator, fs: FS, root: []const u8, work: ?[]const u8, snapshot: ?[]const u8) !bool {
-    const snap = snapshot orelse return true;
-    const work_id = work orelse return false;
-    if (uuid.parseUUID(snap) == null) return false;
+/// stream's log; `null` means explicitly content-degraded (still `ready`-able).
+/// Presence alone is not proof (issue #96): the leg mirrors checkout's
+/// non-writing verification. An unresolvable reference, a missing manifest
+/// line or bound Change, an absent blob, or an explicitly incomplete entry
+/// reports `incomplete`; a torn manifest log, a stream/change/author binding
+/// mismatch, a failed Change or manifest signature, or blob bytes that do
+/// not hash to their id reports `invalid`.
+fn contentLeg(
+    allocator: Allocator,
+    fs: FS,
+    root: []const u8,
+    work: ?[]const u8,
+    snapshot: ?[]const u8,
+    changes_by_id: *const std.StringHashMap(store.Change),
+) !ContentLeg {
+    const snap = snapshot orelse return .verified;
+    const work_id = work orelse return .incomplete;
+    if (uuid.parseUUID(snap) == null) return .incomplete;
 
-    const manifests = try store.loadManifests(allocator, fs, root, work_id);
+    const manifests = store.loadManifests(allocator, fs, root, work_id) catch |err| switch (err) {
+        error.Refuse => return .invalid,
+        else => return err,
+    };
     defer store.freeManifests(allocator, manifests);
-    const m = store.manifestForChange(manifests, snap) orelse return false;
-    for (m.files) |e| {
-        if (e.blob.len == 0) return false;
-        const bp = try store.blobPath(allocator, root, e.blob);
-        defer allocator.free(bp);
-        if (!fs.exists(allocator, bp)) return false;
+    const m = store.manifestForChange(manifests, snap) orelse return .incomplete;
+    const bound = changes_by_id.get(snap) orelse return .incomplete;
+    if (!std.mem.eql(u8, m.stream, bound.stream) or
+        !std.mem.eql(u8, m.change, bound.id) or
+        !std.mem.eql(u8, m.author, bound.author))
+    {
+        return .invalid;
     }
-    return true;
+    const change_ok = ed25519.verifyChange(allocator, &bound) catch |err| switch (err) {
+        error.Refuse => false,
+        else => return err,
+    };
+    if (!change_ok) return .invalid;
+    if (!try ed25519.verifyManifest(allocator, m.*)) return .invalid;
+
+    for (m.files) |e| {
+        if (e.blob.len == 0) return .incomplete;
+        switch (try content.checkBlobContent(allocator, fs, root, e.blob)) {
+            .ok => |data| allocator.free(data),
+            .missing => return .incomplete,
+            .malformed => return .invalid,
+        }
+    }
+    return .verified;
 }
 
 /// Runs a pure semantic merge of `candidate` against `head` — writes nothing
@@ -1426,8 +1464,10 @@ fn computeVerdict(
     if (!ancestry_ok or !stream_known) {
         return .{ .name = "incomplete", .scope = scope };
     }
-    if (!try contentComplete(allocator, fs, root, propose.work, propose.snapshot)) {
-        return .{ .name = "incomplete", .scope = scope };
+    switch (try contentLeg(allocator, fs, root, propose.work, propose.snapshot, &changes_by_id)) {
+        .verified => {},
+        .incomplete => return .{ .name = "incomplete", .scope = scope },
+        .invalid => return .{ .name = "invalid", .scope = scope },
     }
     const head = target_head orelse return .{ .name = "incomplete", .scope = scope };
     const conflicts = dryMergeConflicts(allocator, head, candidate, &changes_by_id, all_changes) catch {

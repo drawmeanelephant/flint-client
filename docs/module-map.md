@@ -27,6 +27,7 @@ flowchart LR
   src_ed25519_zig["src/ed25519.zig"] --> src_report_zig["src/report.zig"]
   src_ed25519_zig["src/ed25519.zig"] --> src_store_zig["src/store.zig"]
   src_ed25519_zig["src/ed25519.zig"] --> src_uuid_zig["src/uuid.zig"]
+  src_handoff_zig["src/handoff.zig"] --> src_content_zig["src/content.zig"]
   src_handoff_zig["src/handoff.zig"] --> src_ed25519_zig["src/ed25519.zig"]
   src_handoff_zig["src/handoff.zig"] --> src_fsys_zig["src/fsys.zig"]
   src_handoff_zig["src/handoff.zig"] --> src_json_zig["src/json.zig"]

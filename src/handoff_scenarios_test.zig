@@ -442,6 +442,108 @@ test "handoff: receiver-side inspect reports incomplete, unknown, invalid" {
     }
 }
 
+test "handoff: inspect downgrades ready when the bound snapshot is corrupt or unauthenticated" {
+    const gpa = std.testing.allocator;
+    var h = try TestHarness.init(gpa);
+    defer h.deinit();
+    h.env_sign_key = rfc8032_seed_hex;
+    const mfs = h.mem.fs();
+
+    const base = try setupTwoStreams(h, gpa, mfs);
+    defer gpa.free(base);
+    const awid = try streamIdByName(gpa, mfs, h.root, "a-work");
+    defer gpa.free(awid);
+    const cand = blk: {
+        var idx = try store.loadStoreIndex(gpa, mfs, h.root);
+        defer idx.deinit();
+        break :blk try gpa.dupe(u8, idx.streamByID(awid).?.head.?);
+    };
+    defer gpa.free(cand);
+
+    const p_out = try runOut(h, gpa, &.{
+        "handoff", "propose", "--stream=main", "--work=a-work", "-m", "ready candidate",
+    }, 0);
+    defer gpa.free(p_out);
+    const hid = try handoffId(gpa, p_out);
+    defer gpa.free(hid);
+
+    // The snapshot Change's manifest line on the work stream's log binds the
+    // blob ids the verdict must re-verify, not just observe.
+    const mlog_path = try store.manifestLogPath(gpa, h.root, awid);
+    defer gpa.free(mlog_path);
+    const mlog_raw = try mfs.readFile(gpa, mlog_path, store.MaxFileReadBytes);
+    defer gpa.free(mlog_raw);
+    const manifest = try json.parseManifest(gpa, std.mem.trim(u8, mlog_raw, "\n"));
+    defer manifest.deinit(gpa);
+    try std.testing.expectEqualStrings(cand, manifest.change);
+    const blob_hex = try gpa.dupe(u8, manifest.files[0].blob);
+    defer gpa.free(blob_hex);
+    const blob_path = try store.blobPath(gpa, h.root, blob_hex);
+    defer gpa.free(blob_path);
+    const blob_bytes = try mfs.readFile(gpa, blob_path, store.MaxBlobBytes);
+    defer gpa.free(blob_bytes);
+    const change_arg = try std.fmt.allocPrint(gpa, "--change={s}", .{cand});
+    defer gpa.free(change_arg);
+
+    // Control: intact claim and content verdict ready and check out.
+    {
+        const out = try runOut(h, gpa, &.{ "handoff", "inspect", hid }, 0);
+        defer gpa.free(out);
+        try std.testing.expect(std.mem.indexOf(u8, out, "state=proposed verdict=ready") != null);
+    }
+    try runExpect(h, gpa, &.{ "checkout", change_arg, "--into=/host/out-ok" }, 0);
+
+    // Corrupt blob bytes under a still-valid id: checkout refuses
+    // blob_malformed, so the verdict can no longer be ready — the content
+    // behind the intact claim is tampered → invalid.
+    try mfs.writeFileSafe(gpa, blob_path, "corrupt synthetic snapshot\n");
+    {
+        const out = try runOut(h, gpa, &.{ "handoff", "inspect", hid }, 0);
+        defer gpa.free(out);
+        try std.testing.expect(std.mem.indexOf(u8, out, "verdict=invalid") != null);
+    }
+    try expectRefuse(h, gpa, &.{ "checkout", change_arg, "--into=/host/out-bad" }, "flint: refuse blob_malformed");
+
+    // The blob gone entirely is unavailable content → incomplete.
+    try mfs.remove(gpa, blob_path);
+    {
+        const out = try runOut(h, gpa, &.{ "handoff", "inspect", hid }, 0);
+        defer gpa.free(out);
+        try std.testing.expect(std.mem.indexOf(u8, out, "verdict=incomplete") != null);
+    }
+    try expectRefuse(h, gpa, &.{ "checkout", change_arg, "--into=/host/out-miss" }, "flint: refuse blob_missing");
+    try mfs.writeFileSafe(gpa, blob_path, blob_bytes);
+    {
+        const out = try runOut(h, gpa, &.{ "handoff", "inspect", hid }, 0);
+        defer gpa.free(out);
+        try std.testing.expect(std.mem.indexOf(u8, out, "verdict=ready") != null);
+    }
+
+    // A flipped manifest signature leaves entries and blobs intact but
+    // authenticates nothing: checkout refuses sig_invalid → invalid.
+    const mut = try gpa.dupe(u8, mlog_raw);
+    defer gpa.free(mut);
+    const sig_key = "\"sig\":\"";
+    const at = std.mem.indexOf(u8, mut, sig_key).? + sig_key.len;
+    mut[at] = if (mut[at] == '0') '1' else '0';
+    try mfs.writeFileSafe(gpa, mlog_path, mut);
+    {
+        const out = try runOut(h, gpa, &.{ "handoff", "inspect", hid }, 0);
+        defer gpa.free(out);
+        try std.testing.expect(std.mem.indexOf(u8, out, "verdict=invalid") != null);
+    }
+    try expectRefuse(h, gpa, &.{ "checkout", change_arg, "--into=/host/out-sig" }, "flint: refuse sig_invalid");
+
+    // Restored bytes restore the ready verdict and an exact checkout.
+    try mfs.writeFileSafe(gpa, mlog_path, mlog_raw);
+    {
+        const out = try runOut(h, gpa, &.{ "handoff", "inspect", hid }, 0);
+        defer gpa.free(out);
+        try std.testing.expect(std.mem.indexOf(u8, out, "verdict=ready") != null);
+    }
+    try runExpect(h, gpa, &.{ "checkout", change_arg, "--into=/host/out-final" }, 0);
+}
+
 test "handoff: verbs never touch workspaces, stage, streams, or Change history" {
     const gpa = std.testing.allocator;
     var h = try TestHarness.init(gpa);
