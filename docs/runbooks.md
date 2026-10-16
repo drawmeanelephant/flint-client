@@ -31,6 +31,32 @@ contain private keys: never attach them to issues or upload them.
 Success: expected heads/ancestry, valid signatures, no missing local history.
 The regression test filter `re-clone never overwrites` exercises this recovery.
 
+## Stale staging base (`stage_stale`)
+
+`commit` refuses `stage_stale` when the pending `STAGE.jsonl` was prepared
+against a different stream head than the current one — typically a `pull`
+(or `pull --reset`) or a sibling workspace's commit moved the head after
+`add` ran — or when `ws/<name>/BASE.json` is missing entirely (unknown
+staging provenance, e.g. a stage written by an older client).
+
+The refusal is safe: staged ops, `ATOMS.jsonl`, source bytes, and history
+are untouched. The guard exists because the staged diff was computed
+against the old base; replaying it onto the moved head would silently
+reparent old intent over peer edits.
+
+1. Inspect what moved: `flint --store <store> log --stream=<stream>` and
+   `flint --store <store> status --ws=<workspace>`. Compare the recorded
+   base in `ws/<name>/BASE.json` with the current head.
+2. Reconcile disk source with the pulled head intentionally (the workspace
+   Atom table still reflects the old base until `add` re-diffs it).
+3. Re-run `flint --store <store> add --ws=<workspace>` — this re-stamps
+   `BASE.json` at the current head and is the explicit acknowledgment.
+4. `flint --store <store> commit --ws=<workspace> -m <msg>` then succeeds.
+
+There is no bypass flag; restaging is the documented acknowledgment. Do not
+hand-edit `BASE.json` to force a commit — that reintroduces the silent
+reparenting the guard prevents.
+
 ## Torn/malformed store or invalid signature
 
 For `stream_torn`, `change_malformed`, or `sig_invalid`, stop writes and

@@ -769,3 +769,250 @@ test "push --stream publishes a saved fork re-anchored to its incorporating merg
         }
     }
 }
+
+test "commit refuses stage_stale for a stage predating a pulled head; re-add restages (#67)" {
+    const gpa = std.testing.allocator;
+
+    var srv_mem = try fsys.MemFS.init(gpa);
+    defer srv_mem.deinit();
+    const srv_fs = srv_mem.fs();
+    try srv_fs.mkdir(gpa, "/srv/FLINT/streams");
+
+    var server = sync.InProcServer{
+        .allocator = gpa,
+        .fs = srv_fs,
+        .store_root = "/srv/FLINT",
+    };
+
+    var ha = try TestHarness.init(gpa);
+    defer ha.deinit();
+    ha.env_sign_key = rfc8032_seed_hex;
+    ha.sync_dial = sync.InProcServer.dial;
+    ha.sync_dial_ctx = &server;
+    const fsa = ha.mem.fs();
+
+    // Shared base on `main`: alpha=1, beta=10 (#67 repro shape).
+    try fsa.writeFileSafe(
+        gpa,
+        "/host/SRCA/main.zig",
+        "pub const alpha: u32 = 1;\npub const beta: u32 = 10;\n",
+    );
+    for ([_][]const []const u8{
+        &.{ "init", "--name=a", "--src=/host/SRCA" },
+        &.{ "add", "/host/SRCA" },
+        &.{ "commit", "-m", "base" },
+        &.{ "push", "--remote=tcp://127.0.0.1:4748" },
+    }) |cmd| {
+        const res = try ha.runCmd(cmd);
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+    }
+
+    var idx_a = try store.loadStoreIndex(gpa, fsa, ha.root);
+    defer idx_a.deinit();
+    const h0 = try gpa.dupe(u8, idx_a.streamByName("main").?.head.?);
+    defer gpa.free(h0);
+
+    // B clones `main`, stages alpha=3 against h0, and does not commit.
+    var hb = try TestHarness.init(gpa);
+    defer hb.deinit();
+    hb.env_sign_key = rfc8032_seed_hex;
+    hb.sync_dial = sync.InProcServer.dial;
+    hb.sync_dial_ctx = &server;
+    const fsb = hb.mem.fs();
+    {
+        const res = try hb.runCmd(&.{
+            "clone", "tcp://127.0.0.1:4748", "--stream=main", "--name=b", "--src=/host/SRCB",
+        });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+    }
+    try fsb.writeFileSafe(
+        gpa,
+        "/host/SRCB/main.zig",
+        "pub const alpha: u32 = 3;\npub const beta: u32 = 10;\n",
+    );
+    {
+        const res = try hb.runCmd(&.{ "add", "--ws=b", "/host/SRCB" });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+    }
+    const stage_path = try store.workspaceStagePath(gpa, hb.root, "b");
+    defer gpa.free(stage_path);
+    const staged = try fsb.readFile(gpa, stage_path, store.MaxFileReadBytes);
+    defer gpa.free(staged);
+
+    // A commits+pushes alpha=2: the shared head advances to h1.
+    try fsa.writeFileSafe(
+        gpa,
+        "/host/SRCA/main.zig",
+        "pub const alpha: u32 = 2;\npub const beta: u32 = 10;\n",
+    );
+    ha.now += 5;
+    for ([_][]const []const u8{
+        &.{ "add", "/host/SRCA" },
+        &.{ "commit", "-m", "alpha=2" },
+        &.{"push"},
+    }) |cmd| {
+        const res = try ha.runCmd(cmd);
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+    }
+    const loaded_a = try store.loadStream(gpa, fsa, ha.root, idx_a.streamByName("main").?.id);
+    defer loaded_a.deinit(gpa);
+    const h1 = try gpa.dupe(u8, loaded_a.stream.head.?);
+    defer gpa.free(h1);
+
+    // B's ordinary pull succeeds: the local head moves to h1 while the
+    // STAGE bytes (diffed against h0) stay untouched.
+    {
+        const res = try hb.runCmd(&.{"pull"});
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+        try std.testing.expectEqualStrings("flint: pull ok stream=main changes=1\n", res.out);
+        const staged_now = try fsb.readFile(gpa, stage_path, store.MaxFileReadBytes);
+        defer gpa.free(staged_now);
+        try std.testing.expectEqualStrings(staged, staged_now);
+    }
+
+    // Committing the pre-pull stage must refuse `stage_stale` instead of
+    // silently reparenting alpha=3 over A's alpha=2.
+    {
+        const res = try hb.runCmd(&.{ "commit", "-m", "staged-before-pull" });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 1), res.rc);
+        const want = try std.fmt.allocPrint(
+            gpa,
+            "flint: refuse stage_stale staged against {s}; stream head is now {s}; re-run add to restage\n",
+            .{ h0, h1 },
+        );
+        defer gpa.free(want);
+        try std.testing.expectEqualStrings(want, res.out);
+        // The refusal preserves the staged intent byte-for-byte.
+        const staged_kept = try fsb.readFile(gpa, stage_path, store.MaxFileReadBytes);
+        defer gpa.free(staged_kept);
+        try std.testing.expectEqualStrings(staged, staged_kept);
+    }
+
+    // Unknown provenance (a stage written before BASE.json existed) refuses
+    // the same way rather than silently assuming the latest head.
+    const base_path = try store.workspaceBasePath(gpa, hb.root, "b");
+    defer gpa.free(base_path);
+    try fsb.remove(gpa, base_path);
+    {
+        const res = try hb.runCmd(&.{ "commit", "-m", "staged-before-pull" });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 1), res.rc);
+        try std.testing.expectEqualStrings(
+            "flint: refuse stage_stale stage base unknown; re-run add to restage\n",
+            res.out,
+        );
+    }
+
+    // Explicit restage: re-running `add` re-stamps BASE.json at h1.
+    {
+        const res = try hb.runCmd(&.{ "add", "--ws=b", "/host/SRCB" });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+    }
+    {
+        const res = try hb.runCmd(&.{ "commit", "-m", "restaged" });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+        const want_suffix = try std.fmt.allocPrint(gpa, " parent={s}\n", .{h1});
+        defer gpa.free(want_suffix);
+        try std.testing.expect(std.mem.endsWith(u8, res.out, want_suffix));
+    }
+    {
+        const res = try hb.runCmd(&.{"push"});
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+        try std.testing.expect(!fsb.exists(gpa, stage_path));
+        try std.testing.expect(!fsb.exists(gpa, base_path));
+    }
+
+    // A fresh observer replays the same workspace table as B: alpha=3 wins,
+    // but only because B re-staged it against h1 after the refusal.
+    var hc = try TestHarness.init(gpa);
+    defer hc.deinit();
+    hc.sync_dial = sync.InProcServer.dial;
+    hc.sync_dial_ctx = &server;
+    const fsc = hc.mem.fs();
+    {
+        const res = try hc.runCmd(&.{
+            "clone", "tcp://127.0.0.1:4748", "--stream=main", "--name=c", "--src=/host/SRCC",
+        });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+    }
+    const atoms_b = try fsb.readFile(gpa, "/host/FLINT/ws/b/ATOMS.jsonl", store.MaxFileReadBytes);
+    defer gpa.free(atoms_b);
+    const atoms_c = try fsc.readFile(gpa, "/host/FLINT/ws/c/ATOMS.jsonl", store.MaxFileReadBytes);
+    defer gpa.free(atoms_c);
+    try std.testing.expectEqualStrings(atoms_b, atoms_c);
+    for ([_]*TestHarness{ hb, hc }) |hx| {
+        const res = try hx.runCmd(&.{ "verify", "--all" });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+    }
+}
+
+test "commit refuses stage_stale when a sibling workspace advances the head (#67)" {
+    const gpa = std.testing.allocator;
+
+    var h = try TestHarness.init(gpa);
+    defer h.deinit();
+    h.env_sign_key = rfc8032_seed_hex;
+    const mfs = h.mem.fs();
+
+    try mfs.writeFileSafe(gpa, "/host/S1/calc.go", "package calc\n\nfunc X() int {\n\treturn 1\n}\n");
+    try mfs.writeFileSafe(gpa, "/host/S2/calc.go", "package calc\n\nfunc X() int {\n\treturn 7\n}\n");
+
+    // w1 commits c1 on `main`; w2 attaches to `main` and stages X=7 on top.
+    for ([_][]const []const u8{
+        &.{ "init", "--name=w1", "--src=/host/S1" },
+        &.{ "add", "--ws=w1", "/host/S1" },
+        &.{ "commit", "--ws=w1", "-m", "c1" },
+        &.{ "init", "--name=w2", "--src=/host/S2", "--stream=main" },
+        &.{ "add", "--ws=w2", "/host/S2" },
+    }) |cmd| {
+        const res = try h.runCmd(cmd);
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+    }
+
+    // w1 advances the same stream's head to c2 — no pull involved.
+    try mfs.writeFileSafe(gpa, "/host/S1/calc.go", "package calc\n\nfunc X() int {\n\treturn 2\n}\n");
+    h.now += 5;
+    for ([_][]const []const u8{
+        &.{ "add", "--ws=w1", "/host/S1" },
+        &.{ "commit", "--ws=w1", "-m", "c2" },
+    }) |cmd| {
+        const res = try h.runCmd(cmd);
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+    }
+
+    // w2's stage was diffed against c1; committing onto c2 must refuse.
+    {
+        const res = try h.runCmd(&.{ "commit", "--ws=w2", "-m", "stale-stage" });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 1), res.rc);
+        try std.testing.expect(
+            std.mem.startsWith(u8, res.out, "flint: refuse stage_stale staged against "),
+        );
+    }
+
+    // Re-running `add` restages against c2; the commit then lands.
+    {
+        const res = try h.runCmd(&.{ "add", "--ws=w2", "/host/S2" });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+    }
+    {
+        const res = try h.runCmd(&.{ "commit", "--ws=w2", "-m", "restaged" });
+        defer gpa.free(res.out);
+        try std.testing.expectEqual(@as(u8, 0), res.rc);
+        try std.testing.expect(std.mem.startsWith(u8, res.out, "flint: commit ok id="));
+    }
+}

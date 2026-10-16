@@ -312,6 +312,16 @@ pub const Workspace = struct {
     }
 };
 
+/// StageBase is the JSON record stored at `<store>/ws/<name>/BASE.json`: the
+/// stream head the pending `STAGE.jsonl` was last staged against (#67).
+pub const StageBase = struct {
+    head: ?[]const u8,
+
+    pub fn deinit(self: StageBase, allocator: Allocator) void {
+        if (self.head) |h| allocator.free(h);
+    }
+};
+
 /// MergeConflict is one conflict entry in `MERGE.json` and merge output.
 pub const MergeConflict = struct {
     atom_id: []const u8,
@@ -393,6 +403,10 @@ pub fn workspaceAtomsPath(allocator: Allocator, root: []const u8, ws: []const u8
 
 pub fn workspaceStagePath(allocator: Allocator, root: []const u8, ws: []const u8) ![]u8 {
     return std.fmt.allocPrint(allocator, "{s}/ws/{s}/STAGE.jsonl", .{ fsys.cleanMemPath(root), ws });
+}
+
+pub fn workspaceBasePath(allocator: Allocator, root: []const u8, ws: []const u8) ![]u8 {
+    return std.fmt.allocPrint(allocator, "{s}/ws/{s}/BASE.json", .{ fsys.cleanMemPath(root), ws });
 }
 
 pub fn workspaceMergePath(allocator: Allocator, root: []const u8, ws: []const u8) ![]u8 {
@@ -956,6 +970,31 @@ pub fn writeWorkspaceStage(allocator: Allocator, fs: FS, root: []const u8, ws: [
     const p = try workspaceStagePath(allocator, root, ws);
     defer allocator.free(p);
     try fs.writeFileSafe(allocator, p, buf.items);
+}
+
+/// LoadWorkspaceStageBase reads `ws/<name>/BASE.json` — the stream head the
+/// pending stage was last staged against — or returns `null` when the file is
+/// absent. Absence means unknown provenance (e.g. a stage written before this
+/// record existed), never "the latest head" (#67).
+pub fn loadWorkspaceStageBase(allocator: Allocator, fs: FS, root: []const u8, ws: []const u8) !?StageBase {
+    const p = try workspaceBasePath(allocator, root, ws);
+    defer allocator.free(p);
+    if (!fs.exists(allocator, p)) return null;
+    const b = try fs.readFile(allocator, p, MaxFileReadBytes);
+    defer allocator.free(b);
+    const head = json.parseStageBase(allocator, b) catch {
+        return fsys.refuse("ws_malformed", ws);
+    };
+    return .{ .head = head };
+}
+
+/// WriteWorkspaceStageBase writes `ws/<name>/BASE.json` via `writeFileSafe`.
+pub fn writeWorkspaceStageBase(allocator: Allocator, fs: FS, root: []const u8, ws: []const u8, head: ?[]const u8) !void {
+    const p = try workspaceBasePath(allocator, root, ws);
+    defer allocator.free(p);
+    const data = try json.marshalStageBaseLine(allocator, head);
+    defer allocator.free(data);
+    try fs.writeFileSafe(allocator, p, data);
 }
 
 /// WriteWorkspaceConfig writes `ws/<name>/WORKSPACE.json` via `writeFileSafe`.
