@@ -194,7 +194,13 @@ invocation populates them. Their payloads are frozen by later slices
     `data.materialized` etc.; it does not get a second schema.
   - `data.content` — when a peer lacks content support, history success
     is reported separately from content incompleteness rather than
-    folding them into one boolean.
+    folding them into one boolean. Emitted by `push`, `pull`, and
+    `clone` as an object: `state` is `complete` (reconciled, nothing
+    outstanding), `incomplete` (a referenced blob the sender could not
+    supply, or a manifest left untransferred; counts under `missing`
+    /`skipped`), or `degraded` (pre-content peer; `op` names the
+    content op the server refused `usage` on or lacked via an absent
+    `spec_rev`), plus `manifests`/`blobs` transfer counts.
 - The envelope promises no stronger atomicity than the operation has:
   `partial`/`unknown` exist precisely because sync is not transactional.
 

@@ -146,6 +146,7 @@ pub fn dispatchStoreVerb(
             dial_fn,
             ctx.sync_dial_ctx,
             out_w,
+            ctx.stderr,
             sub,
         ) catch |err| {
             return fail(rep, err, ctx);
@@ -164,6 +165,7 @@ pub fn dispatchStoreVerb(
             dial_fn,
             ctx.sync_dial_ctx,
             out_w,
+            ctx.stderr,
             sub,
         ) catch |err| {
             return fail(rep, err, ctx);
@@ -182,6 +184,7 @@ pub fn dispatchStoreVerb(
             dial_fn,
             ctx.sync_dial_ctx,
             out_w,
+            ctx.stderr,
             sub,
         ) catch |err| {
             return fail(rep, err, ctx);

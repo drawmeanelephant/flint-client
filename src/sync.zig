@@ -12,6 +12,7 @@ const ed25519 = @import("ed25519.zig");
 const sign = @import("sign.zig");
 const merge = @import("merge.zig");
 const report = @import("report.zig");
+const sync_content = @import("sync_content.zig");
 
 pub const ProtoVersion = "FLINT-SYNC/1";
 
@@ -19,7 +20,7 @@ pub const ProtoVersion = "FLINT-SYNC/1";
 /// the repo-root `SPECREV` file — `tools/tests/test_specrev.py` enforces
 /// the match. Bump rules and the downstream-pinning convention live in
 /// `docs/spec-versioning.md`.
-pub const SpecRev: u32 = 4;
+pub const SpecRev: u32 = 5;
 
 pub const AuthDomain = "FLINT-SYNC-AUTH/1\x00";
 pub const DefaultReadLimit: usize = 256;
@@ -63,7 +64,7 @@ fn checkLogAppendBound(allocator: Allocator, fs: FS, log_path: []const u8, extra
     }
 }
 
-fn readStreamRawLines(allocator: Allocator, fs: FS, root: []const u8, stream_id: []const u8) ![][]u8 {
+pub fn readStreamRawLines(allocator: Allocator, fs: FS, root: []const u8, stream_id: []const u8) ![][]u8 {
     const p = try store.streamLogPath(allocator, root, stream_id);
     defer allocator.free(p);
     if (!fs.exists(allocator, p)) {
@@ -92,7 +93,7 @@ fn readStreamRawLines(allocator: Allocator, fs: FS, root: []const u8, stream_id:
     return out.toOwnedSlice(allocator);
 }
 
-fn freeRawLines(allocator: Allocator, lines: [][]u8) void {
+pub fn freeRawLines(allocator: Allocator, lines: [][]u8) void {
     for (lines) |l| allocator.free(l);
     allocator.free(lines);
 }
@@ -443,12 +444,12 @@ pub const SyncClient = struct {
         self.transport.close(self.allocator);
     }
 
-    fn nextSeq(self: *SyncClient) u64 {
+    pub fn nextSeq(self: *SyncClient) u64 {
         self.seq += 1;
         return self.seq;
     }
 
-    fn sendAndParse(self: *SyncClient, req_line: []const u8) !std.json.Parsed(std.json.Value) {
+    pub fn sendAndParse(self: *SyncClient, req_line: []const u8) !std.json.Parsed(std.json.Value) {
         const resp_line = try self.transport.requestLine(self.allocator, req_line);
         defer self.allocator.free(resp_line);
         const parsed = std.json.parseFromSlice(std.json.Value, self.allocator, resp_line, .{
@@ -457,7 +458,7 @@ pub const SyncClient = struct {
         return parsed;
     }
 
-    fn checkResponseOk(self: *SyncClient, parsed: std.json.Value, expected_seq: u64) !std.json.ObjectMap {
+    pub fn checkResponseOk(self: *SyncClient, parsed: std.json.Value, expected_seq: u64) !std.json.ObjectMap {
         const obj = switch (parsed) {
             .object => |o| o,
             else => return fsys.refuse("change_malformed", ""),
@@ -780,7 +781,7 @@ pub const SyncClient = struct {
     /// (`remoteAttemptRefused`); success confirms it (`remoteAttemptApplied`).
     /// A transport failure leaves the attempt pending, which marshals as
     /// `partial`/`unknown` — never `unchanged`.
-    fn noteRemoteResult(self: *SyncClient, err: ?anyerror) void {
+    pub fn noteRemoteResult(self: *SyncClient, err: ?anyerror) void {
         _ = self;
         const r = report.active orelse return;
         if (err) |e| {
@@ -1126,6 +1127,7 @@ pub fn cmdClone(
     dial_fn: DialFn,
     dial_ctx: ?*anyopaque,
     stdout: *Io.Writer,
+    stderr: *Io.Writer,
     args: []const []const u8,
 ) !void {
     var remote_flag: []const u8 = "";
@@ -1435,6 +1437,16 @@ pub fn cmdClone(
         try store.writeStreamRecord(allocator, fs, root, p.record);
         if (report.active) |r| r.noteLocalWriteDone();
     }
+
+    // Content (spec_rev 4, docs/flint-blobs-spec.md §9): fetch each cloned
+    // stream's signed manifests and the blobs they reference so `checkout`
+    // works on a fresh agent without access to the source directory. A
+    // pre-content server degrades to history-only; the note lands on stderr.
+    var content_outcome = sync_content.ContentOutcome{};
+    for (payloads.items) |p| {
+        try sync_content.pullStreamContent(allocator, fs, root, &client, p.record.id, &content_outcome);
+    }
+    try sync_content.reportContentOutcome(report.active, stderr, &content_outcome);
 
     const final_stream = chain.items[chain.items.len - 1];
     var clone_idx = try store.loadStoreIndex(allocator, fs, root);
@@ -1962,6 +1974,7 @@ pub fn cmdPush(
     dial_fn: DialFn,
     dial_ctx: ?*anyopaque,
     stdout: *Io.Writer,
+    stderr: *Io.Writer,
     args: []const []const u8,
 ) !void {
     var remote_flag: []const u8 = "";
@@ -2058,6 +2071,17 @@ pub fn cmdPush(
 
     const res = try pushSingleStream(allocator, fs, root, &client, &server_heads, target.stream.id);
 
+    // Content (spec_rev 4, docs/flint-blobs-spec.md §9): after every stream's
+    // append/deposit work landed — including ancestor records, fork-origin
+    // deposits, and incorporated work — publish manifests and blobs per
+    // stream across the whole fork chain, blobs before manifests. Runs even
+    // on heads-equal pushes so an interrupted earlier transfer heals.
+    var content_outcome = sync_content.ContentOutcome{};
+    for (chain_ids.items) |sid| {
+        try sync_content.pushStreamContent(allocator, fs, root, &client, sid, &content_outcome);
+    }
+    try sync_content.reportContentOutcome(report.active, stderr, &content_outcome);
+
     if (target.ws_name) |wn| {
         const rc = store.RemoteConfig{
             .remote = remote_url,
@@ -2079,6 +2103,22 @@ pub fn cmdPush(
     }
 }
 
+/// Content reconciliation shared by every successful `pull`/`pull --reset`
+/// exit path: fetch the remote manifest log and land missing blobs so
+/// matching heads still heal an interrupted earlier transfer (§9).
+fn pullContentAndReport(
+    allocator: Allocator,
+    fs: FS,
+    root: []const u8,
+    client: *SyncClient,
+    stream_id: []const u8,
+    stderr: *Io.Writer,
+    outcome: *sync_content.ContentOutcome,
+) !void {
+    try sync_content.pullStreamContent(allocator, fs, root, client, stream_id, outcome);
+    try sync_content.reportContentOutcome(report.active, stderr, outcome);
+}
+
 /// Implements `flint pull [--remote=<url>] [--stream=<s>] [--ws=<name>] [--auth-key=<file>]`.
 pub fn cmdPull(
     allocator: Allocator,
@@ -2090,6 +2130,7 @@ pub fn cmdPull(
     dial_fn: DialFn,
     dial_ctx: ?*anyopaque,
     stdout: *Io.Writer,
+    stderr: *Io.Writer,
     args: []const []const u8,
 ) !void {
     var remote_flag: []const u8 = "";
@@ -2173,6 +2214,8 @@ pub fn cmdPull(
     try client.handshake(auth_key);
     if (report.active) |r| r.setRemoteSpecRev(client.server_spec_rev);
 
+    var content_outcome = sync_content.ContentOutcome{};
+
     const remote_rec = try client.open(target.stream.id);
     defer remote_rec.deinit(allocator);
     if (report.active) |r| try r.observeRemoteHead(remote_rec.head);
@@ -2185,6 +2228,7 @@ pub fn cmdPull(
             try r.fieldInt("received", 0);
             try r.fieldBool("reset", reset_flag);
         }
+        try pullContentAndReport(allocator, fs, root, &client, target.stream.id, stderr, &content_outcome);
         try stdout.writeAll("flint: pull up to date\n");
         return;
     };
@@ -2203,6 +2247,7 @@ pub fn cmdPull(
                     try r.fieldInt("received", 0);
                     try r.fieldBool("reset", reset_flag);
                 }
+                try pullContentAndReport(allocator, fs, root, &client, target.stream.id, stderr, &content_outcome);
                 try stdout.writeAll("flint: pull up to date\n");
                 return;
             }
@@ -2216,6 +2261,7 @@ pub fn cmdPull(
                     try r.fieldInt("received", 0);
                     try r.fieldBool("reset", reset_flag);
                 }
+                try pullContentAndReport(allocator, fs, root, &client, target.stream.id, stderr, &content_outcome);
                 try stdout.writeAll("flint: pull up to date\n");
                 return;
             }
@@ -2234,6 +2280,8 @@ pub fn cmdPull(
             remote_url,
             target.ws_name,
             stdout,
+            stderr,
+            &content_outcome,
         );
     }
 
@@ -2327,6 +2375,7 @@ pub fn cmdPull(
             try r.fieldInt("received", 0);
             try r.fieldBool("reset", reset_flag);
         }
+        try pullContentAndReport(allocator, fs, root, &client, loaded.stream.id, stderr, &content_outcome);
         try stdout.writeAll("flint: pull up to date\n");
         return;
     }
@@ -2371,6 +2420,7 @@ pub fn cmdPull(
         try r.fieldBool("reset", reset_flag);
     }
 
+    try pullContentAndReport(allocator, fs, root, &client, loaded.stream.id, stderr, &content_outcome);
     try stdout.print("flint: pull ok stream={s} changes={d}\n", .{ loaded.stream.name, fresh });
 }
 
@@ -2398,6 +2448,8 @@ fn pullResetToRemote(
     remote_url: []const u8,
     ws_name: ?[]const u8,
     stdout: *Io.Writer,
+    stderr: *Io.Writer,
+    content_outcome: *sync_content.ContentOutcome,
 ) !void {
     const remote_head = remote_rec.head orelse {
         if (report.active) |r| {
@@ -2407,6 +2459,7 @@ fn pullResetToRemote(
             try r.fieldInt("received", 0);
             try r.fieldBool("reset", true);
         }
+        try pullContentAndReport(allocator, fs, root, client, loaded.stream.id, stderr, content_outcome);
         try stdout.writeAll("flint: pull up to date\n");
         return;
     };
@@ -2419,6 +2472,7 @@ fn pullResetToRemote(
             try r.fieldInt("received", 0);
             try r.fieldBool("reset", true);
         }
+        try pullContentAndReport(allocator, fs, root, client, loaded.stream.id, stderr, content_outcome);
         try stdout.writeAll("flint: pull up to date\n");
         return;
     }
@@ -2565,6 +2619,7 @@ fn pullResetToRemote(
         try r.fieldBool("reset", true);
     }
 
+    try pullContentAndReport(allocator, fs, root, client, loaded.stream.id, stderr, content_outcome);
     try stdout.print("flint: pull reset stream={s} changes={d} head={s}\n", .{ loaded.stream.name, missing.items.len, remote_head });
 }
 
@@ -2759,6 +2814,21 @@ pub const InProcServer = struct {
             }
             if (std.mem.eql(u8, op, "deposit")) {
                 return self.handleDeposit(allocator, seq, obj);
+            }
+            // spec_rev 4 content ops (docs/flint-blobs-spec.md §9) — the
+            // fixture serves them unconditionally; clients gate on the
+            // announced `spec_rev`, exactly as against real flintd.
+            if (std.mem.eql(u8, op, "put_manifest")) {
+                return sync_content.servePutManifest(self.server, allocator, seq, obj);
+            }
+            if (std.mem.eql(u8, op, "get_manifest")) {
+                return sync_content.serveGetManifest(self.server, allocator, seq, obj);
+            }
+            if (std.mem.eql(u8, op, "blob_put")) {
+                return sync_content.serveBlobPut(self.server, allocator, seq, obj);
+            }
+            if (std.mem.eql(u8, op, "blob_get")) {
+                return sync_content.serveBlobGet(self.server, allocator, seq, obj);
             }
 
             return marshalRefuse(allocator, seq, "usage", "unknown op");
@@ -3321,7 +3391,7 @@ pub const InProcServer = struct {
         }
     };
 
-    fn marshalRefuse(allocator: Allocator, seq: u64, code: []const u8, detail: []const u8) ![]u8 {
+    pub fn marshalRefuse(allocator: Allocator, seq: u64, code: []const u8, detail: []const u8) ![]u8 {
         var out: std.ArrayList(u8) = .empty;
         errdefer out.deinit(allocator);
         try out.print(allocator, "{{\"seq\":{d},\"ok\":false,\"refuse\":", .{seq});
@@ -3332,7 +3402,7 @@ pub const InProcServer = struct {
         return out.toOwnedSlice(allocator);
     }
 
-    fn marshalErrRefuse(allocator: Allocator, seq: u64, err: anyerror) ![]u8 {
+    pub fn marshalErrRefuse(allocator: Allocator, seq: u64, err: anyerror) ![]u8 {
         if (err == error.Refuse) {
             return marshalRefuse(allocator, seq, fsys.last_refuse.code(), fsys.last_refuse.detail());
         }

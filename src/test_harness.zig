@@ -22,6 +22,9 @@ pub const TestHarness = struct {
     env_auth_key: ?[]const u8 = null,
     sync_dial: ?sync.DialFn = null,
     sync_dial_ctx: ?*anyopaque = null,
+    /// stderr captured by the most recent `runCmd` — refusals still land on
+    /// `out` in text mode; notes like the content-degraded line live here.
+    last_err: std.ArrayList(u8) = .empty,
 
     pub fn init(allocator: Allocator) !*TestHarness {
         const h = try allocator.create(TestHarness);
@@ -35,6 +38,7 @@ pub const TestHarness = struct {
     }
 
     pub fn deinit(self: *TestHarness) void {
+        self.last_err.deinit(self.allocator);
         self.mem.deinit();
         self.allocator.destroy(self);
     }
@@ -74,6 +78,8 @@ pub const TestHarness = struct {
             .sync_dial_ctx = self.sync_dial_ctx,
         };
         const rc = main.runWithContext(ctx, args);
+        self.last_err.clearRetainingCapacity();
+        try self.last_err.appendSlice(self.allocator, err_w.written());
         return .{
             .rc = rc,
             .out = try out_w.toOwnedSlice(),
