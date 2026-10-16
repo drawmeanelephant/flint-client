@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import re
 import select
+import socket
 import subprocess
 import tempfile
 import threading
@@ -281,11 +282,22 @@ class SyncContractTests(unittest.TestCase):
         self.assertEqual(atoms(b), atoms(c))
         self.assertEqual({"main.alpha", "main.beta"}, set(atoms(b)))
 
-    def test_recovery_fork_degrades_cleanly_until_deposit_lands(self):
-        """flint-client#73: `deposit` attempts degrade to the spec_rev 2
-        re-anchor on a server that does not know the op. The fork still
-        pushes and clones; the original signed Change stays local-only
-        until flintd implements `deposit` (companion issue filed)."""
+    def server_spec_rev(self):
+        """Probe the test server's announced spec revision."""
+        host, port = self.remote.removeprefix("tcp://").split(":")
+        with socket.create_connection((host, int(port)), timeout=10) as sock:
+            sock.sendall(b'{"op":"hello","seq":1,"proto":"FLINT-SYNC/1"}\n')
+            reply = json.loads(sock.makefile().readline())
+        return int(reply.get("spec_rev") or 0)
+
+    def test_recovery_fork_transfers_original_when_deposit_lands(self):
+        """flint-client#73 / flint-server#40: a recovery fork pushes the
+        preserved original's detached ancestry via `deposit` when the
+        server speaks spec_rev >= 3, so a fresh clone verifies the
+        original signed Change id. On a pre-deposit server (`usage`
+        refusal) the spec_rev 2 re-anchor fallback applies and the
+        original stays local-only."""
+
         b = self.receiver("b")
         self.ok(b, "keygen", "--name=b")
         (self.source / "main.zig").write_text(
@@ -315,11 +327,16 @@ class SyncContractTests(unittest.TestCase):
                 f"--src={self.root / 'handoff-src'}")
         self.ok(handoff, "verify", "--all")
 
-        # The preserved original is still not retrievable: today's flintd
-        # refuses `deposit` with `usage`, so push fell back to re-anchoring.
+        # spec_rev >= 3 servers accept `deposit`: the original's detached
+        # ancestry lands on the origin stream, and the handoff clone of the
+        # saved fork follows `forked_from` to it. Older servers still take
+        # the re-anchor fallback and leave the original local-only.
         result = self.run_client(handoff, "verify", original)
-        self.assertEqual(result.returncode, 1)
-        self.assertIn("refuse change_missing", result.stdout + result.stderr)
+        if self.server_spec_rev() >= 3:
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        else:
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("refuse change_missing", result.stdout + result.stderr)
 
     def test_merge_after_reset_guards_unmaterialized_source(self):
         """flint-client#72: stale src must refuse src_behind, not silently revert."""
