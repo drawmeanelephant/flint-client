@@ -918,29 +918,6 @@ pub fn loadStoreIndex(allocator: Allocator, fs: FS, root: []const u8) !StoreInde
 }
 
 /// ReadStreamChanges reads and parses `streams/<id>.jsonl` via torn-aware `readJSONLLines`.
-/// ReadStreamRawLines returns a stream log's lines verbatim (detached lines
-/// included), preserving append order — used by packet export for detached
-/// ancestry sections. An absent log yields an empty slice.
-pub fn readStreamRawLines(allocator: Allocator, fs: FS, root: []const u8, stream_id: []const u8) ![][]u8 {
-    const p = try streamLogPath(allocator, root, stream_id);
-    defer allocator.free(p);
-    const data = fs.readFile(allocator, p, MaxFileReadBytes) catch {
-        return try allocator.alloc([]u8, 0);
-    };
-    defer allocator.free(data);
-    var out: std.ArrayList([]u8) = .empty;
-    errdefer {
-        for (out.items) |l| allocator.free(l);
-        out.deinit(allocator);
-    }
-    var it = std.mem.splitScalar(u8, data, '\n');
-    while (it.next()) |line| {
-        if (line.len == 0) continue;
-        try out.append(allocator, try allocator.dupe(u8, line));
-    }
-    return out.toOwnedSlice(allocator);
-}
-
 pub fn readStreamChanges(allocator: Allocator, fs: FS, root: []const u8, stream_id: []const u8) ![]Change {
     const p = try streamLogPath(allocator, root, stream_id);
     defer allocator.free(p);

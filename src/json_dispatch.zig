@@ -201,6 +201,7 @@ pub fn dispatchStoreVerb(
             uuid_gen,
             ctx.env_flint_sign_key,
             out_w,
+            ctx.stderr,
             sub,
         ) catch |err| {
             return fail(rep, err, ctx);
