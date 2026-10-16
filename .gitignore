@@ -25,3 +25,10 @@ __pycache__/
 .flint/
 FLINT/
 *.OUT
+
+# Boris docs site build output, evidence, and resolved profiles
+docs/site/dist/
+docs/site/.boris-cache/
+docs/site/.pages-profile.json
+docs/site/evidence/
+docs/site/public-site/
