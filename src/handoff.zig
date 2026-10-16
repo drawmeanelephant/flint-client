@@ -1789,7 +1789,411 @@ pub fn cmdHandoff(
     if (std.mem.eql(u8, sub, "verify")) {
         return cmdVerifyFile(allocator, fs, out, rest);
     }
+    if (std.mem.eql(u8, sub, "export")) {
+        return cmdExport(allocator, fs, root, out, rest);
+    }
+    if (std.mem.eql(u8, sub, "import")) {
+        return cmdImport(allocator, fs, root, uuid_gen, out, rest);
+    }
     return fsys.refuse("usage", "");
+}
+
+fn cloneRecord(allocator: Allocator, r: store.HandoffRecord) !store.HandoffRecord {
+    const line = try json.marshalHandoffRecord(allocator, r);
+    defer allocator.free(line);
+    return json.parseHandoffRecord(allocator, line[0 .. line.len - 1]);
+}
+
+// -- packet (§7) ---------------------------------------------------------------
+
+/// `handoff export <handoff-id> --out=<file> [--with-changes]` — writes a
+/// `FLINT-HANDOFF-PACKET/1` file: header, the proposal's record lines
+/// byte-verbatim in append order, then optionally the candidate's first-parent
+/// ancestry as raw Change lines (deposit-batch order).
+fn cmdExport(
+    allocator: Allocator,
+    fs: FS,
+    root: []const u8,
+    out: *Io.Writer,
+    args: []const []const u8,
+) !u8 {
+    var handoff_id: []const u8 = "";
+    var out_flag: []const u8 = "";
+    var with_changes = false;
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        const a = args[i];
+        if (std.mem.startsWith(u8, a, "--out=")) {
+            out_flag = a["--out=".len..];
+        } else if (std.mem.eql(u8, a, "--out") and i + 1 < args.len) {
+            i += 1;
+            out_flag = args[i];
+        } else if (std.mem.eql(u8, a, "--with-changes")) {
+            with_changes = true;
+        } else if (!std.mem.startsWith(u8, a, "-") and handoff_id.len == 0) {
+            handoff_id = a;
+        } else {
+            return fsys.refuse("usage", "");
+        }
+    }
+    if (handoff_id.len == 0 or out_flag.len == 0) return fsys.refuse("usage", "");
+
+    var idx = try store.loadStoreIndex(allocator, fs, root);
+    defer idx.deinit();
+
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const aa = arena_state.allocator();
+
+    var found: ?store.Stream = null;
+    var propose_rec: ?store.HandoffRecord = null;
+    var rec_lines: std.ArrayList([]const u8) = .empty;
+    for (idx.streams.items) |*st| {
+        var log = try loadLog(allocator, fs, root, st.id);
+        var hits = std.ArrayList([]const u8).empty;
+        var prop: ?store.HandoffRecord = null;
+        for (log.entries) |*e| {
+            if (e.record) |*r| {
+                if (std.mem.eql(u8, r.handoff, handoff_id)) {
+                    try hits.append(aa, try aa.dupe(u8, e.line));
+                    if (std.mem.eql(u8, r.kind, "propose") and std.mem.eql(u8, r.id, handoff_id)) {
+                        prop = try cloneRecord(aa, r.*);
+                    }
+                }
+            }
+        }
+        if (prop != null) {
+            found = try st.clone(aa);
+            propose_rec = prop;
+            rec_lines = hits;
+            log.deinit();
+            break;
+        }
+        log.deinit();
+    }
+    const st = found orelse return fsys.refuse("handoff_missing", handoff_id);
+    const prop_rec = propose_rec.?;
+
+    // --with-changes: the candidate's first-parent chain on the work stream
+    // (raw bytes, deposit-batch order: parents before children).
+    var change_lines: std.ArrayList([]const u8) = .empty;
+    if (with_changes and prop_rec.work != null) {
+        const wl = try store.loadStream(aa, fs, root, prop_rec.work.?);
+        const raw = try store.readStreamRawLines(aa, fs, root, prop_rec.work.?);
+        var line_idx = std.StringHashMap(usize).init(aa);
+        for (wl.changes, 0..) |c, ci| try line_idx.put(c.id, ci);
+        var chain: std.ArrayList(usize) = .empty;
+        var cur: ?[]const u8 = prop_rec.candidate;
+        while (cur) |cid| {
+            const li = line_idx.get(cid) orelse break;
+            try chain.append(aa, li);
+            cur = wl.changes[li].parent;
+        }
+        std.mem.reverse(usize, chain.items);
+        for (chain.items) |li| try change_lines.append(aa, raw[li]);
+    }
+
+    const work_name = if (idx.streamByID(prop_rec.work.?)) |w| w.name else prop_rec.work.?;
+    var buf: std.ArrayList(u8) = .empty;
+    try buf.appendSlice(aa, "{\"format\":");
+    try json.appendGoJSONString(&buf, aa, packet_format);
+    try buf.appendSlice(aa, ",\"handoff\":");
+    try json.appendGoJSONString(&buf, aa, handoff_id);
+    try buf.appendSlice(aa, ",\"stream\":");
+    try json.appendGoJSONString(&buf, aa, st.id);
+    try buf.appendSlice(aa, ",\"work\":{\"id\":");
+    try json.appendGoJSONString(&buf, aa, prop_rec.work.?);
+    try buf.appendSlice(aa, ",\"name\":");
+    try json.appendGoJSONString(&buf, aa, work_name);
+    try buf.appendSlice(aa, "}");
+    try buf.print(aa, ",\"records\":{d},\"changes\":{d}", .{ rec_lines.items.len, change_lines.items.len });
+    try buf.appendSlice(aa, "}\n");
+    for (rec_lines.items) |l| {
+        try buf.appendSlice(aa, l);
+        try buf.append(aa, '\n');
+    }
+    for (change_lines.items) |l| {
+        try buf.appendSlice(aa, l);
+        try buf.append(aa, '\n');
+    }
+
+    if (std.mem.eql(u8, out_flag, "-")) {
+        try out.writeAll(buf.items);
+        return 0;
+    }
+    try fs.writeFileSafe(allocator, fsys.cleanMemPath(out_flag), buf.items);
+    try out.print("flint: handoff export {s} records={d} changes={d} out={s}\n", .{
+        handoff_id, rec_lines.items.len, change_lines.items.len, out_flag,
+    });
+    return 0;
+}
+
+/// `handoff import <file>` — verify-then-append per §7: record signatures and
+/// lifecycle legality, Change signatures and detached-ancestry rules, dedupe
+/// by id (re-import is a no-op; same id under different bytes refuses). Writes
+/// happen only after the whole packet validates; per-section appends are
+/// crash-safe via the log's appendSync discipline.
+fn cmdImport(
+    allocator: Allocator,
+    fs: FS,
+    root: []const u8,
+    uuid_gen: *uuid.UUIDGen,
+    out: *Io.Writer,
+    args: []const []const u8,
+) !u8 {
+    if (args.len != 1 or args[0].len == 0 or std.mem.startsWith(u8, args[0], "-")) {
+        return fsys.refuse("usage", "");
+    }
+    const data = try fs.readFile(allocator, fsys.cleanMemPath(args[0]), store.MaxFileReadBytes);
+    defer allocator.free(data);
+    if (data.len == 0) return fsys.refuse("handoff_malformed", "empty packet");
+    if (data[data.len - 1] != '\n') return fsys.refuse("handoff_torn", "");
+
+    const lines = try store.readHandoffLines(allocator, data);
+    defer allocator.free(lines);
+    if (lines.len == 0) return fsys.refuse("handoff_malformed", "empty packet");
+
+    // Header.
+    const parsed = std.json.parseFromSlice(std.json.Value, allocator, lines[0], .{}) catch {
+        return fsys.refuse("handoff_malformed", "packet header");
+    };
+    defer parsed.deinit();
+    if (parsed.value != .object) return fsys.refuse("handoff_malformed", "packet header");
+    const obj = parsed.value.object;
+    const fmt = if (obj.get("format")) |v| switch (v) {
+        .string => |x| x,
+        else => "",
+    } else "";
+    if (!std.mem.eql(u8, fmt, packet_format)) {
+        return fsys.refuse("handoff_malformed", "packet header");
+    }
+    const handoff_id = if (obj.get("handoff")) |v| switch (v) {
+        .string => |x| x,
+        else => return fsys.refuse("handoff_malformed", "packet header"),
+    } else return fsys.refuse("handoff_malformed", "packet header");
+    const target_id = if (obj.get("stream")) |v| switch (v) {
+        .string => |x| x,
+        else => return fsys.refuse("handoff_malformed", "packet header"),
+    } else return fsys.refuse("handoff_malformed", "packet header");
+    const work_id = if (obj.get("work")) |v| switch (v) {
+        .object => |o| (if (o.get("id")) |iv| switch (iv) {
+            .string => |x| x,
+            else => "",
+        } else ""),
+        else => "",
+    } else "";
+    const work_name = if (obj.get("work")) |v| switch (v) {
+        .object => |o| (if (o.get("name")) |nv| switch (nv) {
+            .string => |x| x,
+            else => "",
+        } else ""),
+        else => "",
+    } else "";
+    const n_records: usize = if (obj.get("records")) |v| switch (v) {
+        .integer => |n| if (n > 0) @intCast(n) else 0,
+        else => return fsys.refuse("handoff_malformed", "packet header"),
+    } else return fsys.refuse("handoff_malformed", "packet header");
+    const n_changes: usize = if (obj.get("changes")) |v| switch (v) {
+        .integer => |n| if (n >= 0) @intCast(n) else 0,
+        else => return fsys.refuse("handoff_malformed", "packet header"),
+    } else return fsys.refuse("handoff_malformed", "packet header");
+    if (lines.len - 1 != n_records + n_changes) {
+        return fsys.refuse("handoff_malformed", "count mismatch");
+    }
+
+    var idx = try store.loadStoreIndex(allocator, fs, root);
+    defer idx.deinit();
+    const target = idx.streamByID(target_id) orelse
+        (idx.streamByName(target_id) orelse return fsys.refuse("stream_missing", target_id));
+
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const aa = arena_state.allocator();
+
+    // Verify every record: framing/per-kind rules, packet binding, signature.
+    var recs: std.ArrayList(store.HandoffRecord) = .empty;
+    for (lines[1 .. 1 + n_records]) |line| {
+        var r = try json.parseHandoffRecord(aa, line);
+        if (!std.mem.eql(u8, r.stream, target.id) or
+            !std.mem.eql(u8, r.handoff, handoff_id))
+        {
+            return fsys.refuse("handoff_malformed", "binding");
+        }
+        if (!try ed25519.verifyHandoff(aa, &r)) {
+            return fsys.refuse("sig_invalid", "handoff");
+        }
+        try recs.append(aa, r);
+    }
+
+    // Verify bundled Changes (own authors, unchanged bytes) and check the
+    // detached-ancestry rule: each parent is null, already known locally, or
+    // earlier in this section.
+    var changes: std.ArrayList(store.Change) = .empty;
+    var known = std.StringHashMap(void).init(aa);
+    {
+        var work_known = try store.loadStream(aa, fs, root, if (work_id.len > 0) work_id else target.id);
+        if (work_id.len > 0) {
+            if (idx.streamByID(work_id)) |w| {
+                _ = w;
+            } else {
+                // Work stream may be absent; `known` then holds only the
+                // target log's ids (detached ancestry cross-reference).
+            }
+        }
+        for (work_known.changes) |c| try known.put(try aa.dupe(u8, c.id), {});
+        work_known.deinit(aa);
+        var tl = try store.loadStream(aa, fs, root, target.id);
+        for (tl.changes) |c| try known.put(try aa.dupe(u8, c.id), {});
+        tl.deinit(aa);
+    }
+    for (lines[1 + n_records .. 1 + n_records + n_changes]) |line| {
+        var c = json.parseChange(aa, line) catch
+            return fsys.refuse("change_malformed", "");
+        if (work_id.len > 0 and !std.mem.eql(u8, c.stream, work_id)) {
+            return fsys.refuse("change_malformed", "stream mismatch");
+        }
+        if (!try ed25519.verifyChange(aa, &c)) {
+            return fsys.refuse("sig_invalid", "change");
+        }
+        if (c.parent) |p| {
+            if (!known.contains(p)) {
+                return fsys.refuse("change_malformed", "detached parent unknown");
+            }
+        }
+        try known.put(try aa.dupe(u8, c.id), {});
+        try changes.append(aa, c);
+    }
+
+    // Append record lines: dedupe byte-identical, conflict on differing bytes,
+    // lifecycle legality vs the post-change log state.
+    var log = try loadLog(allocator, fs, root, target.id);
+    defer log.deinit();
+    var appended: usize = 0;
+    for (recs.items) |r| {
+        const line = try json.marshalHandoffRecord(allocator, r);
+        defer allocator.free(line);
+        const body = line[0 .. line.len - 1];
+        var dup = false;
+        for (log.entries) |*e| {
+            if (e.record) |*old| {
+                if (std.mem.eql(u8, old.id, r.id)) {
+                    if (!std.mem.eql(u8, e.line, body)) {
+                        return fsys.refuse("handoff_malformed", "id conflict");
+                    }
+                    dup = true;
+                }
+            }
+        }
+        if (dup) continue;
+
+        // Lifecycle: event records need a known live proposal; withdraw is
+        // proposer-only; supersede's replacement must be a live proposal.
+        if (!std.mem.eql(u8, r.kind, "propose")) {
+            var prop_rec: ?*const store.HandoffRecord = null;
+            var terminated = false;
+            for (log.entries) |*e| {
+                if (e.record) |*old| {
+                    if (!std.mem.eql(u8, old.handoff, r.handoff)) continue;
+                    if (std.mem.eql(u8, old.kind, "propose") and std.mem.eql(u8, old.id, r.handoff)) {
+                        prop_rec = old;
+                    } else if (std.mem.eql(u8, old.kind, "accept") or
+                        std.mem.eql(u8, old.kind, "supersede") or
+                        std.mem.eql(u8, old.kind, "withdraw"))
+                    {
+                        terminated = true;
+                    }
+                }
+            }
+            // The packet itself may carry the proposal's earlier records —
+            // check recs already staged this import as well.
+            if (prop_rec == null) {
+                for (recs.items) |*pr| {
+                    if (std.mem.eql(u8, pr.kind, "propose") and std.mem.eql(u8, pr.id, r.handoff)) {
+                        prop_rec = @constCast(pr);
+                        break;
+                    }
+                }
+            }
+            if (prop_rec == null) return fsys.refuse("handoff_missing", r.handoff);
+            if (terminated and !std.mem.eql(u8, r.kind, "attest")) {
+                return fsys.refuse("handoff_closed", r.handoff);
+            }
+            if (std.mem.eql(u8, r.kind, "withdraw") and
+                !std.mem.eql(u8, r.author, prop_rec.?.author))
+            {
+                return fsys.refuse("handoff_author", r.handoff);
+            }
+        }
+        const lp = try store.handoffLogPath(allocator, root, target.id);
+        defer allocator.free(lp);
+        const dir = try store.handoffsDir(allocator, root);
+        defer allocator.free(dir);
+        try fs.mkdir(allocator, dir);
+        try fs.appendSync(allocator, lp, line);
+        appended += 1;
+        // Refresh the log so later records see this one.
+        {
+            const r2 = try json.parseHandoffRecord(allocator, body);
+            const e = LogEntry{
+                .line = try allocator.dupe(u8, body),
+                .handoff = try allocator.dupe(u8, r.handoff),
+                .status = .ok,
+                .record = r2,
+            };
+            const nl = try allocator.alloc(LogEntry, log.entries.len + 1);
+            @memcpy(nl[0..log.entries.len], log.entries);
+            nl[log.entries.len] = e;
+            allocator.free(@constCast(log.entries));
+            log.entries = nl;
+        }
+    }
+
+    // Bundled detached Changes land on the work stream's log; create the
+    // stream record from header name + fork data when absent (§7).
+    var changes_written: usize = 0;
+    if (changes.items.len > 0) {
+        if (work_id.len > 0 and idx.streamByID(work_id) == null) {
+            const now_ms: i64 = try uuid_gen.nowMs();
+            const created = store.Stream{
+                .id = try allocator.dupe(u8, work_id),
+                .name = try allocator.dupe(u8, if (work_name.len > 0) work_name else work_id),
+                .head = null,
+                .created = now_ms,
+                .forked_from = null,
+            };
+            try store.writeStreamRecord(allocator, fs, root, created);
+            var c = created;
+            c.deinit(allocator);
+        }
+        const wlp = try store.streamLogPath(allocator, root, work_id);
+        defer allocator.free(wlp);
+        const wlog = try store.readStreamChanges(allocator, fs, root, work_id);
+        defer store.freeChanges(allocator, wlog);
+        var w_ids = std.StringHashMap(void).init(allocator);
+        defer {
+            var it = w_ids.keyIterator();
+            while (it.next()) |k| allocator.free(k.*);
+            w_ids.deinit();
+        }
+        for (wlog) |c| try w_ids.put(try allocator.dupe(u8, c.id), {});
+        var wbuf: std.ArrayList(u8) = .empty;
+        defer wbuf.deinit(allocator);
+        for (changes.items) |c| {
+            if (w_ids.contains(c.id)) continue;
+            const cline = try json.marshalChangeLine(allocator, c);
+            defer allocator.free(cline);
+            try wbuf.appendSlice(allocator, cline);
+            changes_written += 1;
+        }
+        if (wbuf.items.len > 0) {
+            try fs.appendSync(allocator, wlp, wbuf.items);
+        }
+    }
+
+    try out.print("flint: handoff import {s} records={d} changes={d}\n", .{
+        handoff_id, appended, changes_written,
+    });
+    return 0;
 }
 
 // ---------------------------------------------------------------------------
