@@ -1,0 +1,1 @@
+{"v":1,"verb":"status","ok":true,"exit":0,"kind":"ok","workspace":"w","stream":"main","heads":{"base":"01a144ce-ec30-7000-8981-7219beafc000","result":"01a144ce-ec30-7000-8981-7219beafc000","remote":null},"changes":null,"conflicts":null,"refusal":null,"error":null,"local":"unchanged","remote":null,"data":{"atoms":2,"staged":0,"add":0,"modify":0,"delete":0,"duplicates":0,"ops":[]}}

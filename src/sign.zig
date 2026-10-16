@@ -6,6 +6,7 @@ const FS = fsys.FS;
 const store = @import("store.zig");
 const uuid = @import("uuid.zig");
 const ed25519 = @import("ed25519.zig");
+const report = @import("report.zig");
 
 pub const loadSigningSeed = ed25519.loadSigningSeed;
 pub const signChangeWithSeed = ed25519.signChangeWithSeed;
@@ -86,6 +87,11 @@ pub fn cmdCommit(
 
     const ws = try store.resolveWorkspace(allocator, fs, &idx, ws_flag, &.{});
 
+    if (report.active) |r| {
+        const sname = if (idx.streamByID(ws.stream)) |st| st.name else ws.stream;
+        try r.setScope(ws.name, sname);
+    }
+
     const stage = try store.loadWorkspaceStage(allocator, fs, root, ws.name);
     defer store.freeOps(allocator, stage);
 
@@ -123,6 +129,13 @@ pub fn cmdCommit(
     // refuses the same way rather than silently assuming the latest head.
     const stage_base = try store.loadWorkspaceStageBase(allocator, fs, root, ws.name);
     defer if (stage_base) |sb| sb.deinit(allocator);
+
+    if (report.active) |r| {
+        try r.setScope(ws.name, loaded.stream.name);
+        try r.observeBaseHead(if (stage_base) |sb| sb.head else null);
+        try r.observeResultHead(expected_head);
+    }
+
     if (stage_base) |sb| {
         if (!store.optStrEql(sb.head, expected_head)) {
             const detail = try std.fmt.allocPrint(
@@ -164,6 +177,7 @@ pub fn cmdCommit(
 
     // Commit order: (1) append Change + FileSync, (2) rewrite Stream record,
     // (3) remove STAGE.jsonl.
+    if (report.active) |r| r.beginLocalWrites();
     var updated_st = try store.appendStreamChange(allocator, fs, root, loaded.stream.id, expected_head, c);
     updated_st.deinit(allocator);
 
@@ -181,6 +195,17 @@ pub fn cmdCommit(
         const merge_path = try store.workspaceMergePath(allocator, root, ws.name);
         defer allocator.free(merge_path);
         try fs.remove(allocator, merge_path);
+    }
+
+    if (report.active) |r| {
+        try r.observeResultHead(c.id);
+        try r.noteAffected(c.id);
+        r.localApplied();
+        try r.fieldStr("id", c.id);
+        try r.fieldInt("ops", c.ops.len);
+        try r.fieldStr("message", msg);
+        try r.fieldOptStrOmitNull("merged", c.merged);
+        try r.fieldBool("merge_resolution", merge_report != null);
     }
 
     const parent_str = c.parent orelse "none";

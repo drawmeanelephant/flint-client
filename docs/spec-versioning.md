@@ -54,6 +54,7 @@ makes several protocol-visible changes still bumps once.
 | 1 | `SPECREV` convention; client parses optional `spec_rev` in `hello` replies; `flint version` verb | [#50](https://github.com/drawmeanelephant/flint-client/issues/50) |
 | 2 | `ws/<name>/BASE.json` staging-base record (`{"head":…}`); `add` stamps it, `commit` refuses `stage_stale` when the recorded base differs from the current head or is missing | [#67](https://github.com/drawmeanelephant/flint-client/issues/67) |
 | 3 | `deposit` op: detached Change lines in stream logs (store + wire contract, reader rules, push policy); `pull` reads the log suffix even when heads match; re-clone fast-forward compares id order | [#73](https://github.com/drawmeanelephant/flint-client/issues/73) |
+| 4 | `--json` result envelopes v1 (`docs/flint-json-results-spec.md`): one structured result per invocation for `status`, `add`, `commit`, `merge`, `push`, `pull`, `clone`, `verify` | [#79](https://github.com/drawmeanelephant/flint-client/issues/79) |
 
 ## 3. The `hello` `spec_rev` field
 

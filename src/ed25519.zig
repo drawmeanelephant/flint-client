@@ -8,6 +8,7 @@ const FS = fsys.FS;
 const uuid = @import("uuid.zig");
 const store = @import("store.zig");
 const json = @import("json.zig");
+const report = @import("report.zig");
 
 const hex_digits = "0123456789abcdef";
 
@@ -445,14 +446,44 @@ pub fn cmdKeygen(
 
 fn verifyChangeList(allocator: Allocator, changes: []const store.Change, out: *Io.Writer) !u8 {
     var rc: u8 = 0;
+    var verified: usize = 0;
+    var failed: usize = 0;
+    var listed: usize = 0;
+    var omitted: usize = 0;
+    var list_buf: std.ArrayList(u8) = .empty;
+    defer list_buf.deinit(allocator);
+    if (report.active != null) try list_buf.append(allocator, '[');
     for (changes) |*c| {
         const ok = try verifyChange(allocator, c);
         if (ok) {
+            verified += 1;
             try out.print("flint: verify {s} sig: verified\n", .{c.id});
         } else {
+            failed += 1;
             try out.print("flint: verify {s} sig_invalid\n", .{c.id});
             rc = 1;
         }
+        if (report.active != null) {
+            if (listed < report.MaxListEntries) {
+                if (listed > 0) try list_buf.append(allocator, ',');
+                try list_buf.appendSlice(allocator, "{\"id\":");
+                try report.escapeInto(&list_buf, allocator, c.id);
+                try list_buf.appendSlice(allocator, ",\"sig\":");
+                try report.escapeInto(&list_buf, allocator, if (ok) "verified" else "sig_invalid");
+                try list_buf.append(allocator, '}');
+                listed += 1;
+            } else {
+                omitted += 1;
+            }
+        }
+    }
+    if (report.active) |r| {
+        r.setKind(if (rc == 0) .ok else .failed);
+        try r.fieldInt("verified", verified);
+        try r.fieldInt("failed", failed);
+        try list_buf.append(allocator, ']');
+        try r.fieldRaw("changes", list_buf.items);
+        if (omitted > 0) try r.fieldInt("changes_omitted", omitted);
     }
     return rc;
 }
