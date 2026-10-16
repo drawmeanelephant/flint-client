@@ -25,8 +25,8 @@
       "may_import": ["foundation", "model", "operations", "sync"]
     },
     "cli": {
-      "files": ["src/main.zig"],
-      "may_import": ["foundation", "model", "parser", "operations", "sync"]
+      "files": ["src/main.zig", "src/sync_mutate_test.zig"],
+      "may_import": ["foundation", "model", "parser", "operations", "sync", "cli"]
     }
   }
 }

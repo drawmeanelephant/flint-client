@@ -254,6 +254,68 @@ def run_scenario(fx, verb, title, op, mutate, must_refuse):
     record("%s: %s" % (verb, title), not problems, "; ".join(problems))
 
 
+def pull_prefix(fx):
+    """A signed proper prefix with `more:false` never reaches the advertised
+    head; pull must refuse and leave the store untouched (#58)."""
+    client = fx.new_client("prefix")
+    rc, out, _ = flint(f"--store={client}", "clone", f"tcp://127.0.0.1:{fx.port}", "--stream=main", "--name=main", f"--src={client / 'src'}", "--read-timeout=2")
+    assert rc == 0, out
+    for _ in range(2):
+        fx.commit()
+    flint(f"--store={fx.author}", "push", f"--remote=tcp://127.0.0.1:{fx.port}")
+    before = tree(client)
+    proxy = Proxy(fx.port, on("read", lambda r, raw: [enc({**r, "changes": r["changes"][:1], "more": False})]))
+    rc, out, _ = flint(f"--store={client}", "pull", f"--remote=tcp://127.0.0.1:{proxy.port}", "--stream=main", "--read-timeout=2")
+    proxy.close()
+    problems = []
+    if rc == "HANG":
+        problems.append("hung >%ds" % TIMEOUT)
+    elif rc == 0:
+        problems.append("published incomplete head: " + out.strip()[-80:])
+    if tree(client) != before:
+        problems.append("failed pull changed the store")
+    vrc, _, _ = flint(f"--store={client}", "verify", "--all")
+    if vrc != 0:
+        problems.append("store fails verify afterwards")
+    record("pull: signed proper prefix with more:false", not problems, "; ".join(problems))
+
+
+def pull_padded_pages(fx):
+    """Every reply/line stays under its own bound, but the padded suffix would
+    push the log past 4 MiB; pull must refuse and leave the store untouched (#59)."""
+    client = fx.new_client("padded")
+    rc, out, _ = flint(f"--store={client}", "clone", f"tcp://127.0.0.1:{fx.port}", "--stream=main", "--name=main", f"--src={client / 'src'}", "--read-timeout=2")
+    assert rc == 0, out
+    for _ in range(5):
+        fx.commit()
+    flint(f"--store={fx.author}", "push", f"--remote=tcp://127.0.0.1:{fx.port}")
+    before = tree(client)
+    calls = [0]
+
+    def pad(r, raw):
+        calls[0] += 1
+        r["changes"] = [c + " " * (900_000 - len(c.encode())) for c in r["changes"]]
+        if calls[0] == 1 and len(r["changes"]) > 3:
+            r["changes"] = r["changes"][:3]
+            r["more"] = True
+        return [enc(r)]
+
+    proxy = Proxy(fx.port, on("read", pad))
+    rc, out, _ = flint(f"--store={client}", "pull", f"--remote=tcp://127.0.0.1:{proxy.port}", "--stream=main", "--read-timeout=2")
+    proxy.close()
+    problems = []
+    if rc == "HANG":
+        problems.append("hung >%ds" % TIMEOUT)
+    elif rc == 0:
+        problems.append("wrote oversized log: " + out.strip()[-80:])
+    if tree(client) != before:
+        problems.append("failed pull changed the store")
+    vrc, _, _ = flint(f"--store={client}", "verify", "--all")
+    if vrc != 0:
+        problems.append("store fails verify afterwards")
+    record("pull: padded pages exceed 4 MiB log bound", not problems, "; ".join(problems))
+
+
 def push_hang(fx):
     proxy = Proxy(fx.port, on("hello", lambda r, raw: "HANG"))
     fx.commit()
@@ -274,6 +336,8 @@ def main():
             run_scenario(fx, "pull", title, op, mutate, must)
         for title, op, mutate, must in CLONE_ONLY:
             run_scenario(fx, "clone", title, op, mutate, must)
+        pull_prefix(fx)
+        pull_padded_pages(fx)
         push_hang(fx)
     finally:
         fx.close()
