@@ -54,7 +54,10 @@ jobs:
           key: zig-0.17.0-flintd-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('tools/flint-server-pin.txt') }}
       - name: Build flintd
         working-directory: build/flint-server
-        run: zig build
+        # ReleaseSafe, matching the client binary the real-server suites build:
+        # a Debug flintd pays a stack-trace capture per allocation, which put
+        # the 4096-atom sync-contract clone past its 60s timeout on macOS.
+        run: zig build -Doptimize=ReleaseSafe
       - name: Documented build, lint, tests, and CLI QA
         run: python3 tools/check.py
         env:

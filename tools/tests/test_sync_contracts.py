@@ -29,7 +29,13 @@ class SyncContractTests(unittest.TestCase):
     def setUpClass(cls):
         if not SERVER.is_file():
             raise unittest.SkipTest("real flintd not built; build sibling server or set FLINTD")
-        subprocess.run(["zig", "build"], cwd=ROOT, check=True, capture_output=True, timeout=120)
+        # ReleaseSafe, not the Debug default: a Debug binary pays a full
+        # stack-trace capture per allocation (SafeAllocator), which pushes a
+        # near-maximum-atom clone past the per-command timeout below (#60).
+        # These tests gate wire behavior; ReleaseSafe keeps the same safety
+        # checks while dropping the instrumentation overhead.
+        subprocess.run(["zig", "build", "-Doptimize=ReleaseSafe"], cwd=ROOT,
+                       check=True, capture_output=True, timeout=300)
 
     def setUp(self):
         self.env = {k: v for k, v in os.environ.items() if not k.startswith("FLINT_")}
@@ -78,10 +84,8 @@ class SyncContractTests(unittest.TestCase):
         self.server.stderr.close()
 
     def run_client(self, store, *args):
-        # 240s (not 60s): cloning a near-maximum-atom log on a throttled CI
-        # runner legitimately exceeds a minute in a debug build (#60).
         return subprocess.run([str(CLIENT), f"--store={store}", *args], env=self.env,
-                              capture_output=True, text=True, timeout=240)
+                              capture_output=True, text=True, timeout=60)
 
     def ok(self, store, *args):
         result = self.run_client(store, *args)

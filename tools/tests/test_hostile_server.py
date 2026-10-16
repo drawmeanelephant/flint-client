@@ -21,7 +21,12 @@ class HostileServerTests(unittest.TestCase):
     def setUpClass(cls):
         if not SERVER.is_file():
             raise unittest.SkipTest("real flintd not built; build sibling server or set FLINTD")
-        subprocess.run(["zig", "build"], cwd=ROOT, check=True, capture_output=True, timeout=120)
+        # ReleaseSafe, matching test_sync_contracts: a Debug binary pays a
+        # stack-trace capture per allocation (SafeAllocator), which inflates
+        # every scenario run on slower runners without changing the wire
+        # behavior this suite gates.
+        subprocess.run(["zig", "build", "-Doptimize=ReleaseSafe"], cwd=ROOT,
+                       check=True, capture_output=True, timeout=300)
 
     def test_mutating_proxy_scenarios_refuse_bad_replies(self):
         result = subprocess.run([sys.executable, str(SUITE)], cwd=ROOT,
