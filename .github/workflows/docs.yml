@@ -1,0 +1,112 @@
+name: Documentation
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docs-${{ github.event_name == 'pull_request' && github.event.pull_request.number || 'pages' }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: docs-build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      pages: read
+    steps:
+      - name: Checkout documentation
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Read the reviewed Boris pin
+        id: pin
+        run: |
+          PIN=$(tr -d '\r\n' < docs/boris-pin.txt)
+          [[ "$PIN" =~ ^[0-9a-f]{40}$ ]]
+          echo "ref=$PIN" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout the pinned compiler
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          repository: drawmeanelephant/boris
+          ref: ${{ steps.pin.outputs.ref }}
+          path: zig-cache/docs-boris
+          persist-credentials: false
+
+      - name: Install checksum-verified Zig 0.16.0
+        run: |
+          curl -fsSL --retry 3 --max-time 120 \
+            https://ziglang.org/download/0.16.0/zig-x86_64-linux-0.16.0.tar.xz \
+            -o "$RUNNER_TEMP/zig.tar.xz"
+          echo "70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00  $RUNNER_TEMP/zig.tar.xz" | sha256sum -c -
+          tar -xJf "$RUNNER_TEMP/zig.tar.xz" -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/zig-x86_64-linux-0.16.0" >> "$GITHUB_PATH"
+
+      - name: Resolve Pages location (publishing only)
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        id: pages
+        uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
+
+      - name: Create the resolved publishing profile
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        env:
+          BASE_URL: ${{ steps.pages.outputs.base_url }}
+          ORIGIN: ${{ steps.pages.outputs.origin }}
+          BASE_PATH: ${{ steps.pages.outputs.base_path }}
+        run: |
+          test -n "$BASE_URL"
+          test -n "$ORIGIN"
+          jq --arg url "$BASE_URL" --arg origin "$ORIGIN" --arg path "$BASE_PATH" \
+            '.site.url=$url | .publication.base_url=$url |
+             .publication.origin=$origin | .publication.base_path=$path' \
+            docs/site/boris.json > docs/site/.pages-profile.json
+
+      - name: Validate, compile, verify, and package
+        id: site
+        env:
+          BORIS_CHECKOUT: ${{ github.workspace }}/zig-cache/docs-boris
+          PROFILE: ${{ github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && 'docs/site/.pages-profile.json' || 'docs/site/boris.json' }}
+        run: bash docs/build.sh "$PROFILE"
+
+      - name: Retain publication evidence (not deployed)
+        if: always() && steps.site.outputs.evidence_dir != ''
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: docs-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ steps.site.outputs.evidence_dir }}
+            !${{ steps.site.outputs.public_dir }}
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload the public Pages artifact
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: ${{ steps.site.outputs.public_dir }}
+
+  deploy:
+    name: docs-deploy
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy verified documentation
+        id: deployment
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1

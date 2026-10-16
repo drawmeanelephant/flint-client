@@ -1,0 +1,23 @@
+{
+  "format": "boris-publication-profile",
+  "schema_version": 1,
+  "input": "content",
+  "site": {
+    "title": "flint",
+    "description": "An agent-native source-control client, byte-compatible with ADR 0049.",
+    "url": "https://drawmeanelephant.github.io/flint-client"
+  },
+  "publication": {
+    "target": "github-pages",
+    "base_url": "https://drawmeanelephant.github.io/flint-client",
+    "origin": "https://drawmeanelephant.github.io",
+    "base_path": "/flint-client"
+  },
+  "targets": [{
+    "name": "public",
+    "output": "dist",
+    "public": true,
+    "theme": "themes/flatlophone",
+    "sitemap": {"path": "sitemap.xml"}
+  }]
+}
